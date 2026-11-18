@@ -1,0 +1,439 @@
+package com.arabickb.shaped
+
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.content.SharedPreferences
+import android.content.res.Configuration
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.inputmethodservice.InputMethodService
+import android.text.TextUtils
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+
+class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolActions {
+    private val logical = StringBuilder()   // النص الأصلي المقروء للمقطع الحالي
+    private var shown = ""                  // ما كتبناه فعلاً في الحقل (وضع المباشر)
+    private var converting = true           // true = كتابة معكوسة (تحويل)، false = كتابة عادية
+    private var deferred = false            // وضع الدفعة: لا نكتب في الحقل حتى الإدراج
+    private var gameMode = false            // الحذف بضغطات Backspace (للألعاب)
+    private var rawField = false
+    private var lastStamp = -1L
+    private var panelMode = 0               // 0 كيبورد، 1 إيموجي، 2 أدوات وحافظة
+    private lateinit var prefs: SharedPreferences
+    private lateinit var cfg: KbConfig
+    private lateinit var pal: Palette
+    private lateinit var keyboard: KeyboardView
+    private lateinit var preview: TextView
+    private lateinit var previewRow: LinearLayout
+    private lateinit var chipMode: TextView
+    private lateinit var actionPill: TextView
+    private lateinit var segNormal: TextView
+    private lateinit var segRev: TextView
+    private lateinit var btnEmoji: TextView
+    private lateinit var btnClip: TextView
+    private lateinit var btnExt: TextView
+    private lateinit var btnEn: TextView
+    private lateinit var btnAr: TextView
+    private var emojiPanel: EmojiPanel? = null
+    private var clipPanel: ClipPanel? = null
+
+    private val clips = ArrayList<String>()
+    private var clipMgr: ClipboardManager? = null
+    private val clipListener = ClipboardManager.OnPrimaryClipChangedListener { captureClip() }
+
+    private fun dp(v: Float) = (v * resources.displayMetrics.density).toInt()
+
+    override fun onCreate() {
+        super.onCreate()
+        prefs = getSharedPreferences("kb", Context.MODE_PRIVATE)
+        clips.addAll((prefs.getString("clips", "") ?: "").split("\u0001").filter { it.isNotEmpty() })
+        clipMgr = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipMgr?.addPrimaryClipChangedListener(clipListener)
+    }
+
+    override fun onDestroy() {
+        clipMgr?.removePrimaryClipChangedListener(clipListener)
+        super.onDestroy()
+    }
+
+    override fun onEvaluateFullscreenMode() = false
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        setInputView(onCreateInputView())
+    }
+
+    private fun loadPrefs() {
+        cfg = KbConfig.load(prefs, this)
+        pal = Palette.of(cfg)
+        converting = prefs.getBoolean("convert", true)
+        deferred = prefs.getBoolean("deferred", false)
+        gameMode = prefs.getBoolean("game", false)
+        lastStamp = prefs.getLong("stamp", 0L)
+    }
+
+    private fun withA(c: Int, a: Int) = (c and 0x00FFFFFF) or (a shl 24)
+
+    private fun bg(color: Int, r: Int = 19) = GradientDrawable().apply { cornerRadius = dp(r.toFloat()).toFloat(); setColor(color) }
+
+    private fun icon(label: String, w: Float, size: Float = 18f, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = size
+        gravity = Gravity.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(pal.text)
+        setOnClickListener { onClick() }
+        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, w)
+    }
+
+    private fun pill(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 14f
+        gravity = Gravity.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+        setPadding(dp(14f), 0, dp(14f), 0)
+        setOnClickListener { onClick() }
+    }
+
+    override fun onCreateInputView(): View {
+        loadPrefs()
+        panelMode = 0
+
+        val root = BgLinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+        }
+        root.applyBg(cfg)
+
+        // ===== الشريط العلوي (أيقونات) =====
+        val strip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = bg(withA(pal.key, 210), 22)
+            setPadding(dp(4f), 0, dp(4f), 0)
+        }
+        strip.addView(icon("⚙", 1f) {
+            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        })
+        btnEmoji = icon("😊", 1f) { showPanel(if (panelMode == 1) 0 else 1) }
+        strip.addView(btnEmoji)
+        btnClip = icon("📋", 1f) { showPanel(if (panelMode == 2) 0 else 2) }
+        strip.addView(btnClip)
+        btnExt = icon("پچ", 1f, 16f) { showPanel(0); keyboard.toggleExtLayer() }
+        strip.addView(btnExt)
+
+        // زرّا الكتابة: عادي / معكوس
+        val seg = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, dp(34f), 2.8f)
+            background = bg(withA(pal.func, 200), 17)
+        }
+        segNormal = icon("عادي", 1f, 14f) { setConverting(false) }
+        segRev = icon("معكوس", 1f, 14f) { setConverting(true) }
+        seg.addView(segNormal)
+        seg.addView(segRev)
+        strip.addView(seg)
+
+        strip.addView(icon("🌐", 1f) {
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
+        })
+        btnEn = icon("En", 1f, 16f) { showPanel(0); keyboard.showLanguage(true) }
+        strip.addView(btnEn)
+        btnAr = icon("ع", 1f, 18f) { showPanel(0); keyboard.showLanguage(false) }
+        strip.addView(btnAr)
+        root.addView(
+            strip,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44f)).apply {
+                setMargins(dp(8f), dp(6f), dp(8f), dp(2f))
+            },
+        )
+
+        // ===== سطر المعاينة =====
+        previewRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8f), 0, dp(8f), 0)
+        }
+        preview = TextView(this).apply {
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.START
+            gravity = Gravity.CENTER_VERTICAL or Gravity.END
+            textSize = 16f
+            textDirection = View.TEXT_DIRECTION_ANY_RTL
+            setPadding(dp(8f), 0, dp(8f), 0)
+        }
+        chipMode = pill("") { toggleDeferred() }
+        actionPill = pill("") { onAction() }
+        previewRow.addView(preview, LinearLayout.LayoutParams(0, dp(34f), 1f))
+        previewRow.addView(chipMode, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(30f)).apply { marginEnd = dp(6f) })
+        previewRow.addView(actionPill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(30f)))
+        root.addView(previewRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        // ===== المحتوى: الكيبورد + اللوحات =====
+        keyboard = KeyboardView(this, cfg).apply { listener = this@ShapedKeyboardService }
+        val content = FrameLayout(this)
+        content.addView(keyboard, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        val ep = EmojiPanel(this, pal, prefs) { e -> onText(e) }
+        ep.visibility = View.GONE
+        content.addView(ep, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        emojiPanel = ep
+        val cp = ClipPanel(this, pal, this)
+        cp.visibility = View.GONE
+        cp.setClips(clips)
+        content.addView(cp, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        clipPanel = cp
+        root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, keyboard.heightPx()))
+
+        updateUi()
+        return root
+    }
+
+    private fun showPanel(mode: Int) {
+        panelMode = mode
+        keyboard.visibility = if (mode == 0) View.VISIBLE else View.INVISIBLE
+        emojiPanel?.visibility = if (mode == 1) View.VISIBLE else View.GONE
+        clipPanel?.visibility = if (mode == 2) View.VISIBLE else View.GONE
+        if (mode == 2) clipPanel?.setClips(clips)
+        updateUi()
+    }
+
+    private fun mark(tv: TextView, on: Boolean) {
+        tv.setTextColor(if (on) pal.onAccent else pal.text)
+        tv.background = if (on) bg(pal.accent, 17) else null
+    }
+
+    override fun onLayerChanged() { updateUi() }
+
+    private fun updateUi() {
+        mark(segNormal, !converting)
+        mark(segRev, converting)
+        mark(btnEmoji, panelMode == 1)
+        mark(btnClip, panelMode == 2)
+        mark(btnExt, panelMode == 0 && keyboard.isExtLayer())
+        mark(btnEn, panelMode == 0 && keyboard.isEnglish())
+        mark(btnAr, panelMode == 0 && !keyboard.isEnglish())
+        chipMode.text = if (deferred) "دفعة" else "مباشر"
+        chipMode.setTextColor(pal.text)
+        chipMode.background = bg(withA(pal.func, 220), 15)
+        actionPill.text = if (deferred) "إدراج" else "فصل"
+        actionPill.setTextColor(if (deferred) pal.onAccent else pal.text)
+        actionPill.background = bg(if (deferred) pal.accent else withA(pal.func, 220), 15)
+        previewRow.visibility = if (cfg.previewRow || deferred) View.VISIBLE else View.GONE
+        val empty = logical.isEmpty()
+        preview.setTextColor(if (empty) pal.hint else pal.text)
+        preview.text = when {
+            !empty -> logical.toString()
+            rawField -> "هذا الحقل يستقبل نصاً عادياً"
+            !converting -> "الكتابة العادية مفعّلة"
+            deferred -> "اكتب ثم اضغط إدراج أو Enter"
+            else -> "الكتابة المعكوسة مفعّلة — ما تكتبه يظهر هنا مقروءاً"
+        }
+    }
+
+    override fun onStartInputView(info: EditorInfo, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        resetSegment()
+        // إن غيّر المستخدم الإعدادات نعيد بناء الواجهة
+        if (prefs.getLong("stamp", 0L) != lastStamp) setInputView(onCreateInputView())
+        val cls = info.inputType and EditorInfo.TYPE_MASK_CLASS
+        val v = info.inputType and EditorInfo.TYPE_MASK_VARIATION
+        val password = cls == EditorInfo.TYPE_CLASS_TEXT && (v == EditorInfo.TYPE_TEXT_VARIATION_PASSWORD ||
+            v == EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD || v == EditorInfo.TYPE_TEXT_VARIATION_WEB_PASSWORD)
+        rawField = (cls != EditorInfo.TYPE_CLASS_TEXT) || password
+        converting = prefs.getBoolean("convert", true)
+        deferred = prefs.getBoolean("deferred", false)
+        gameMode = prefs.getBoolean("game", false)
+        captureClip()
+        showPanel(0)
+    }
+
+    override fun onFinishInput() {
+        super.onFinishInput()
+        if (!deferred) resetSegment()
+    }
+
+    private fun active() = converting && !rawField
+
+    private fun resetSegment() { logical.setLength(0); shown = "" }
+
+    /** هل ما زال نص المقطع قبل المؤشر كما كتبناه؟ (إن حرّك المستخدم المؤشر نبدأ مقطعاً جديداً) */
+    private fun segmentIntact(): Boolean {
+        if (shown.isEmpty() || gameMode) return true
+        val before = currentInputConnection?.getTextBeforeCursor(shown.length, 0) ?: return true
+        return before.length != shown.length || before.toString() == shown
+    }
+
+    private fun deleteShown() {
+        val ic = currentInputConnection ?: return
+        if (shown.isEmpty()) return
+        if (gameMode) repeat(shown.length) { sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL) }
+        else ic.deleteSurroundingText(shown.length, 0)
+        shown = ""
+    }
+
+    private fun refresh() {
+        val ic = currentInputConnection ?: return
+        val out = ArabicShaper.shape(logical.toString())
+        if (gameMode) {
+            deleteShown()
+            ic.commitText(out, 1)
+        } else {
+            ic.beginBatchEdit()
+            deleteShown()
+            ic.commitText(out, 1)
+            ic.endBatchEdit()
+        }
+        shown = out
+        updateUi()
+    }
+
+    private fun appendLogical(text: String) {
+        val n = logical.length
+        if (text == " " && cfg.doubleSpace && n >= 2 && logical[n - 1] == ' ' && logical[n - 2] !in " .،؟!?:;\n") {
+            logical.setLength(n - 1)
+            logical.append(". ")
+        } else {
+            logical.append(text)
+        }
+    }
+
+    override fun onText(text: String) {
+        if (!active()) { currentInputConnection?.commitText(text, 1); return }
+        if (text == "\n") { onEnter(); return }
+        if (deferred) { appendLogical(text); updateUi(); return }
+        if (!segmentIntact()) resetSegment()
+        appendLogical(text)
+        refresh()
+    }
+
+    override fun onDelete() {
+        if (active() && logical.isNotEmpty()) {
+            if (deferred) {
+                logical.setLength(logical.offsetByCodePoints(logical.length, -1))
+                updateUi()
+                return
+            }
+            if (segmentIntact()) {
+                logical.setLength(logical.offsetByCodePoints(logical.length, -1))
+                if (logical.isEmpty()) { deleteShown(); updateUi() } else refresh()
+                return
+            }
+            resetSegment()
+            updateUi()
+        }
+        sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+    }
+
+    private fun insertPending() {
+        if (logical.isEmpty()) return
+        val out = if (active()) ArabicShaper.shape(logical.toString()) else logical.toString()
+        currentInputConnection?.commitText(out, 1)
+        resetSegment()
+        updateUi()
+    }
+
+    override fun onEnter() {
+        if (deferred && active() && logical.isNotEmpty()) { insertPending(); return }
+        resetSegment()
+        updateUi()
+        val ei = currentInputEditorInfo
+        val action = ei?.imeOptions?.and(EditorInfo.IME_MASK_ACTION) ?: EditorInfo.IME_ACTION_NONE
+        val noEnterAction = ei != null && (ei.imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION) != 0
+        if (!noEnterAction && action != EditorInfo.IME_ACTION_NONE && action != EditorInfo.IME_ACTION_UNSPECIFIED) {
+            sendDefaultEditorAction(true)
+        } else {
+            sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
+        }
+    }
+
+    override fun onLangLongPress() {
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
+    }
+
+    override fun onCursor(dir: Int) {
+        moveCursor(if (dir < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT)
+    }
+
+    private fun onAction() {
+        if (deferred) insertPending() else { resetSegment(); updateUi() }
+    }
+
+    private fun setConverting(on: Boolean) {
+        if (deferred) insertPending()
+        converting = on
+        prefs.edit().putBoolean("convert", on).apply()
+        resetSegment()
+        updateUi()
+    }
+
+    private fun toggleDeferred() {
+        if (deferred) insertPending()
+        deferred = !deferred
+        prefs.edit().putBoolean("deferred", deferred).apply()
+        resetSegment()
+        updateUi()
+    }
+
+    private fun moveCursor(code: Int) {
+        if (deferred) insertPending() else resetSegment()
+        sendDownUpKeyEvents(code)
+        updateUi()
+    }
+
+    // ===== ToolActions =====
+    override fun cursor(left: Boolean) {
+        moveCursor(if (left) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT)
+    }
+
+    override fun menu(id: Int) {
+        if (deferred) insertPending() else resetSegment()
+        currentInputConnection?.performContextMenuAction(id)
+        updateUi()
+    }
+
+    private fun commitConverted(t: String) {
+        if (t.isEmpty()) return
+        if (deferred) insertPending() else resetSegment()
+        currentInputConnection?.commitText(if (active()) ArabicShaper.shape(t) else t, 1)
+        updateUi()
+    }
+
+    override fun pasteConverted() {
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val t = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+        commitConverted(t)
+    }
+
+    override fun insertClip(text: String) = commitConverted(text)
+
+    override fun clearClips() {
+        clips.clear()
+        prefs.edit().putString("clips", "").apply()
+        clipPanel?.setClips(clips)
+    }
+
+    private fun captureClip() {
+        try {
+            val t = clipMgr?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString()
+            if (t != null && t.isNotBlank()) {
+                clips.remove(t)
+                clips.add(0, t)
+                while (clips.size > 20) clips.removeAt(clips.size - 1)
+                prefs.edit().putString("clips", clips.joinToString("\u0001")).apply()
+                clipPanel?.setClips(clips)
+            }
+        } catch (e: Throwable) {
+            // بعض الأجهزة تمنع قراءة الحافظة أحياناً؛ نتجاهل
+        }
+    }
+}
