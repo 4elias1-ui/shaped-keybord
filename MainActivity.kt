@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.provider.Settings
@@ -24,6 +25,7 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.materialswitch.MaterialSwitch
@@ -32,18 +34,31 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
     private var preview: KeyboardView? = null
     private var previewFrame: BgLinearLayout? = null
+    private var previewRev = false
 
     private val pickImage = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) {
-            if (BgImage.saveFrom(this@MainActivity, uri)) {
-                edit { putInt("bgmode", 2) }
-                Toast.makeText(this@MainActivity, "تم تعيين الصورة كخلفية", Toast.LENGTH_SHORT).show()
-                recreate()
-            } else {
-                Toast.makeText(this@MainActivity, "تعذّر قراءة الصورة", Toast.LENGTH_SHORT).show()
-            }
+        onImagePicked(uri, false)
+    }
+    private val pickImageR = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        onImagePicked(uri, true)
+    }
+
+    private fun onImagePicked(uri: android.net.Uri?, rev: Boolean) {
+        if (uri == null) return
+        if (BgImage.saveFrom(this, uri, rev)) {
+            edit { putInt(if (rev) "bgmode_r" else "bgmode", 2) }
+            Toast.makeText(this, "تم تعيين الصورة كخلفية", Toast.LENGTH_SHORT).show()
+            recreate()
+        } else {
+            Toast.makeText(this, "تعذّر قراءة الصورة", Toast.LENGTH_SHORT).show()
         }
     }
+
+    private val themeInts = listOf(
+        "theme", "accent", "radius", "gap", "font", "keyalpha", "height", "width", "align", "digits", "splitgap",
+        "c_key", "c_func", "c_bg", "c_accent", "c_text", "bgmode", "bggrad", "bgdim", "bgmode_r", "bggrad_r", "bgdim_r",
+    )
+    private val themeBools = listOf("fround", "edge", "hints", "preview", "flip", "numbers", "split", "bgsplit", "prow")
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -54,8 +69,95 @@ class MainActivity : AppCompatActivity() {
         e.putLong("stamp", System.currentTimeMillis())
         e.apply()
         val c = KbConfig.load(prefs, this)
-        previewFrame?.applyBg(c)
+        previewFrame?.applyBg(c, previewRev)
         preview?.applyConfig(c)
+    }
+
+    // ===== الثيمات المحفوظة =====
+    private fun themeData(): String {
+        val parts = ArrayList<String>()
+        for (k in themeInts) if (prefs.contains(k)) parts.add("$k=${prefs.getInt(k, 0)}")
+        for (k in themeBools) if (prefs.contains(k)) parts.add("$k=${prefs.getBoolean(k, false)}")
+        return parts.joinToString(";")
+    }
+
+    private fun applyThemeData(d: String) {
+        edit {
+            for (k in themeInts) remove(k)
+            for (k in themeBools) remove(k)
+            for (part in d.split(";")) {
+                val kv = part.split("=")
+                if (kv.size != 2) continue
+                val k = kv[0]
+                val v = kv[1]
+                if (k in themeInts) {
+                    val n = v.toIntOrNull()
+                    if (n != null) putInt(k, n)
+                } else if (k in themeBools) {
+                    if (v == "true" || v == "false") putBoolean(k, v == "true")
+                }
+            }
+        }
+    }
+
+    private fun readThemes(): List<Pair<String, String>> =
+        (prefs.getString("themes", "") ?: "").split("\n").mapNotNull {
+            val i = it.indexOf('\t')
+            if (i > 0) Pair(it.substring(0, i), it.substring(i + 1)) else null
+        }
+
+    private fun writeThemes(list: List<Pair<String, String>>) {
+        prefs.edit().putString("themes", list.joinToString("\n") { it.first + "\t" + it.second }).apply()
+    }
+
+    private fun cleanName(s: String) = s.replace(Regex("[\\t\\n|;]"), " ").trim().take(30)
+
+    // ===== نافذة اختيار لون =====
+    private fun colorDialog(title: String, key: String, onDone: () -> Unit) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), 0)
+        }
+        val start = if (prefs.contains(key)) prefs.getInt(key, 0) else 0xFF3F5EFB.toInt()
+        val hsv = FloatArray(3)
+        Color.colorToHSV(start, hsv)
+        val swatch = View(this)
+        val hex = EditText(this).apply { hint = "#RRGGBB"; inputType = InputType.TYPE_CLASS_TEXT }
+        fun cur(): Int = Color.HSVToColor(hsv)
+        fun sync() {
+            swatch.setBackgroundColor(cur())
+            hex.setText(String.format("#%06X", 0xFFFFFF and cur()))
+        }
+        fun bar(label: String, max: Int, init: Int, set: (Int) -> Unit) {
+            box.addView(TextView(this).apply { text = label })
+            val sb = SeekBar(this)
+            sb.max = max
+            sb.progress = init
+            sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, u: Boolean) { if (u) { set(p); sync() } }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+            box.addView(sb)
+        }
+        box.addView(swatch, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+        bar("الدرجة", 360, hsv[0].toInt()) { hsv[0] = it.toFloat() }
+        bar("التشبع", 100, (hsv[1] * 100).toInt()) { hsv[1] = it / 100f }
+        bar("السطوع", 100, (hsv[2] * 100).toInt()) { hsv[2] = it / 100f }
+        box.addView(hex)
+        sync()
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(box)
+            .setPositiveButton("حفظ") { _, _ ->
+                val t = hex.text.toString().trim()
+                val parsed = try { Color.parseColor(if (t.startsWith("#")) t else "#$t") } catch (e: Exception) { null }
+                edit { putInt(key, parsed ?: cur()) }
+                onDone()
+            }
+            .setNeutralButton("افتراضي") { _, _ -> edit { remove(key) }; onDone() }
+            .setNegativeButton("إلغاء", null)
+            .show()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -118,6 +220,32 @@ class MainActivity : AppCompatActivity() {
                 recreate()
             }, lp())
         }
+        fun colorRow(label: String, key: String) {
+            val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            val tv = TextView(ctx).apply { text = label; textSize = 15f }
+            val swatch = View(ctx)
+            fun paint() {
+                swatch.setBackgroundColor(if (prefs.contains(key)) prefs.getInt(key, 0) else 0xFF9E9E9E.toInt())
+            }
+            paint()
+            val change = btn("تغيير") { colorDialog(label, key) { paint() } }
+            row.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(swatch, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginEnd = dp(8); marginStart = dp(8) })
+            row.addView(change, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            root.addView(row, lp())
+        }
+        fun bgSection(heading: String, suffix: String, rev: Boolean) {
+            root.addView(body(heading))
+            spinner("نوع الخلفية", "bgmode$suffix", listOf("لون الثيم", "تدرّج لوني", "صورة من المعرض"), 0)
+            spinner("التدرّج", "bggrad$suffix", Backgrounds.NAMES, 0)
+            root.addView(btn("اختيار صورة من المعرض") { if (rev) pickImageR.launch("image/*") else pickImage.launch("image/*") }, lp())
+            root.addView(btn("حذف الصورة") {
+                BgImage.delete(ctx, rev)
+                edit { putInt("bgmode$suffix", 0) }
+                recreate()
+            }, lp())
+            slider("تعتيم الصورة", "bgdim$suffix", 0, 80, 30, "%")
+        }
 
         root.addView(title("كيبورد عربي محوّل"))
         root.addView(body("يكتب بالعربية بحروف متصلة بترتيب مقلوب، فتظهر سليمة في التطبيقات والألعاب التي لا تدعم العربية (Genshin، Minecraft، Notion، Photoshop…)."))
@@ -131,12 +259,18 @@ class MainActivity : AppCompatActivity() {
         root.addView(body("أي تغيير في الإعدادات أدناه يظهر هنا فوراً، ويُطبَّق على الكيبورد عند فتحه في أي حقل."))
         val cfg0 = KbConfig.load(prefs, ctx)
         val frame = BgLinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        frame.applyBg(cfg0)
+        frame.applyBg(cfg0, previewRev)
         val pv = KeyboardView(ctx, cfg0)
         frame.addView(pv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         previewFrame = frame
         preview = pv
         root.addView(frame, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        val pvRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+        pvRow.addView(btn("معاينة: عادي") { previewRev = false; previewFrame?.applyBg(KbConfig.load(prefs, ctx), false) },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        pvRow.addView(btn("معاينة: معكوس") { previewRev = true; previewFrame?.applyBg(KbConfig.load(prefs, ctx), true) },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(pvRow, lp())
 
         root.addView(title("أنماط جاهزة"))
         preset("الافتراضي", "radius" to null, "gap" to null, "height" to null, "font" to null, "width" to null, "align" to null, "keyalpha" to null)
@@ -157,25 +291,51 @@ class MainActivity : AppCompatActivity() {
         sw("إظهار حرف أو رقم البدائل الصغير على المفاتيح", "hints", true)
         sw("فقاعة تكبير الحرف عند الضغط", "preview", true)
 
+        root.addView(title("ألوان مخصصة"))
+        root.addView(body("اختر أي لون، أو اضغط «افتراضي» للرجوع إلى لون الثيم."))
+        colorRow("لون المفاتيح", "c_key")
+        colorRow("لون مفاتيح الوظائف", "c_func")
+        colorRow("لون الخلفية", "c_bg")
+        colorRow("لون التمييز", "c_accent")
+        colorRow("لون النص", "c_text")
+
         root.addView(title("الخلفية"))
-        spinner("نوع الخلفية", "bgmode", listOf("لون الثيم", "تدرّج لوني", "صورة من المعرض"), 0)
-        spinner("التدرّج", "bggrad", Backgrounds.NAMES, 0)
-        root.addView(btn("اختيار صورة من المعرض") { pickImage.launch("image/*") }, lp())
-        root.addView(btn("حذف صورة الخلفية") {
-            BgImage.delete(ctx)
-            edit { putInt("bgmode", 0) }
-            recreate()
-        }, lp())
-        slider("تعتيم الصورة", "bgdim", 0, 80, 30, "%")
+        sw("خلفية مختلفة للكتابة المعكوسة (تتغير عند الضغط على زر معكوس)", "bgsplit", false)
+        bgSection("خلفية الكتابة العادية (وهي الخلفية الوحيدة إن لم تفعّل الخيار أعلاه)", "", false)
+        bgSection("خلفية الكتابة المعكوسة", "_r", true)
 
         root.addView(title("الحجم والموضع"))
         slider("ارتفاع المفاتيح", "height", 40, 76, 56, " dp")
         slider("عرض الكيبورد", "width", 50, 100, 100, "%")
         spinner("مكان الكيبورد (عند تصغير العرض)", "align", listOf("يسار", "وسط", "يمين"), 1)
+        sw("كيبورد منقسم (مناسب للتابلت)", "split", false)
+        slider("عرض الفراغ الأوسط", "splitgap", 10, 40, 20, "%")
         sw("قلب أماكن مفاتيح الحذف والإدخال", "flip", false)
         sw("صف أرقام مستقل (وإلا تظهر الأرقام كتلميحات على الصف الأول)", "numbers", false)
         spinner("شكل الأرقام", "digits", listOf("1 2 3 (لاتيني)", "١ ٢ ٣ (عربي)", "۱ ۲ ۳ (فارسي)"), 1)
         sw("إظهار سطر المعاينة فوق الكيبورد", "prow", true)
+
+        root.addView(title("الكتابة الذكية"))
+        slider("تقسيم الأسطر الطويلة: عدد الأحرف في السطر (0 = معطّل)", "wrap", 0, 120, 0, "")
+        root.addView(body("يفيد في صناديق النص التي تدعم عدة أسطر؛ يُقلب كل سطر وحده فيظهر الكلام الطويل سليماً."))
+        sw("اقتراح الكلمات (يتعلم من كتابتك ويحفظ ذلك على جهازك فقط)", "suggest", true)
+        sw("تصحيح الأخطاء الإملائية الشائعة (مثل: هاذا ← هذا، لاكن ← لكن)", "autofix", true)
+        root.addView(btn("مسح الكلمات التي تعلّمها الكيبورد") {
+            edit { remove("learned") }
+            Toast.makeText(ctx, "تم المسح", Toast.LENGTH_SHORT).show()
+        }, lp())
+        root.addView(body("العبارات الجاهزة (كل سطر عبارة):"))
+        val phrasesEdit = EditText(ctx).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 3; gravity = Gravity.TOP
+            setText((prefs.getString("phrases", "") ?: "").split("\u0001").filter { it.isNotEmpty() }.joinToString("\n"))
+        }
+        root.addView(phrasesEdit, lp())
+        root.addView(btn("حفظ العبارات") {
+            val list = phrasesEdit.text.toString().split("\n").map { it.trim() }.filter { it.isNotEmpty() }.take(50)
+            edit { putString("phrases", list.joinToString("\u0001")) }
+            Toast.makeText(ctx, "تم الحفظ", Toast.LENGTH_SHORT).show()
+        }, lp())
 
         root.addView(title("التحكم"))
         sw("تفعيل الكتابة المعكوسة افتراضياً", "convert", true)
@@ -190,6 +350,49 @@ class MainActivity : AppCompatActivity() {
         root.addView(btn("إعادة ضبط كل الإعدادات") {
             edit { clear() }
             recreate()
+        }, lp())
+
+        root.addView(title("الثيمات المحفوظة"))
+        root.addView(body("احفظ مظهرك الحالي (الألوان والأحجام والخلفية المتدرجة) واستعده لاحقاً، أو شاركه كنص. صور الخلفية لا تُحفظ مع الثيم."))
+        val nameEdit = EditText(ctx).apply { hint = "اسم الثيم"; inputType = InputType.TYPE_CLASS_TEXT }
+        root.addView(nameEdit, lp())
+        root.addView(btn("حفظ المظهر الحالي كثيم") {
+            val n = cleanName(nameEdit.text.toString())
+            if (n.isEmpty()) {
+                Toast.makeText(ctx, "اكتب اسماً للثيم", Toast.LENGTH_SHORT).show()
+            } else {
+                val list = readThemes().filter { it.first != n } + Pair(n, themeData())
+                writeThemes(list)
+                recreate()
+            }
+        }, lp())
+        for ((name, data) in readThemes()) {
+            val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            row.addView(TextView(ctx).apply { text = name; textSize = 16f }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(btn("تطبيق") { applyThemeData(data); recreate() })
+            row.addView(btn("نسخ") {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("theme", "SKB1|$name|$data"))
+                Toast.makeText(ctx, "تم نسخ الثيم، الصقه لمن تريد مشاركته", Toast.LENGTH_SHORT).show()
+            })
+            row.addView(btn("حذف") {
+                writeThemes(readThemes().filter { it.first != name })
+                recreate()
+            })
+            root.addView(row, lp())
+        }
+        val importEdit = EditText(ctx).apply { hint = "الصق نص ثيم هنا (يبدأ بـ SKB1)"; inputType = InputType.TYPE_CLASS_TEXT }
+        root.addView(importEdit, lp())
+        root.addView(btn("استيراد ثيم") {
+            val parts = importEdit.text.toString().trim().split("|")
+            if (parts.size == 3 && parts[0] == "SKB1") {
+                val n = cleanName(parts[1]).ifEmpty { "ثيم مستورد" }
+                writeThemes(readThemes().filter { it.first != n } + Pair(n, parts[2]))
+                applyThemeData(parts[2])
+                recreate()
+            } else {
+                Toast.makeText(ctx, "النص غير صالح", Toast.LENGTH_SHORT).show()
+            }
         }, lp())
 
         root.addView(title("المحوّل (مثل الموقع)"))

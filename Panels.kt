@@ -113,9 +113,12 @@ interface ToolActions {
     fun pasteConverted()
     fun insertClip(text: String)
     fun clearClips()
+    fun pinClip(text: String)
+    fun savePhraseFromCurrent()
+    fun deletePhrase(text: String)
 }
 
-/** لوحة الأدوات والحافظة: أزرار التحرير وسجل النسخ. */
+/** لوحة الأدوات: أزرار التحرير + تبويب الحافظة (مع التثبيت) + تبويب العبارات الجاهزة. */
 class ClipPanel(
     context: Context,
     private val pal: Palette,
@@ -123,6 +126,12 @@ class ClipPanel(
 ) : LinearLayout(context) {
     private val dpx = resources.displayMetrics.density
     private val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+    private val tabClip = TextView(context)
+    private val tabPhrases = TextView(context)
+    private var tab = 0
+    private var clips: List<String> = emptyList()
+    private var pins: List<String> = emptyList()
+    private var phrases: List<String> = emptyList()
 
     init {
         orientation = LinearLayout.VERTICAL
@@ -138,7 +147,7 @@ class ClipPanel(
                 background = roundBg(pal.func, 20 * dpx)
                 setOnClickListener { f() }
             }
-            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (40 * dpx).toInt())
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (38 * dpx).toInt())
             lp.marginEnd = (6 * dpx).toInt()
             tools.addView(tv, lp)
         }
@@ -153,38 +162,95 @@ class ClipPanel(
         val hs = HorizontalScrollView(context).apply {
             isHorizontalScrollBarEnabled = false
             addView(tools)
-            setPadding((8 * dpx).toInt(), (8 * dpx).toInt(), (8 * dpx).toInt(), (8 * dpx).toInt())
+            setPadding((8 * dpx).toInt(), (6 * dpx).toInt(), (8 * dpx).toInt(), (4 * dpx).toInt())
         }
         addView(hs, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val tabs = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+        for ((i, tv) in listOf(tabClip, tabPhrases).withIndex()) {
+            tv.text = if (i == 0) "الحافظة" else "العبارات الجاهزة"
+            tv.textSize = 14f
+            tv.typeface = Typeface.DEFAULT_BOLD
+            tv.gravity = Gravity.CENTER
+            tv.setOnClickListener { tab = i; render() }
+            tabs.addView(tv, LinearLayout.LayoutParams(0, (34 * dpx).toInt(), 1f))
+        }
+        val tlp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        tlp.setMargins((8 * dpx).toInt(), 0, (8 * dpx).toInt(), (4 * dpx).toInt())
+        addView(tabs, tlp)
+
         val sv = ScrollView(context).apply { addView(list) }
         addView(sv, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        render()
     }
 
-    fun setClips(clips: List<String>) {
-        list.removeAllViews()
-        if (clips.isEmpty()) {
-            list.addView(TextView(context).apply {
-                text = "سجل الحافظة فارغ. انسخ نصاً وسيظهر هنا."
-                setTextColor(pal.hint)
-                gravity = Gravity.CENTER
-                setPadding(0, (24 * dpx).toInt(), 0, 0)
-            })
-            return
+    fun setData(clips: List<String>, pins: List<String>, phrases: List<String>) {
+        this.clips = clips
+        this.pins = pins
+        this.phrases = phrases
+        render()
+    }
+
+    private fun hint(t: String): TextView = TextView(context).apply {
+        text = t
+        textSize = 13f
+        setTextColor(pal.hint)
+        gravity = Gravity.CENTER
+        setPadding(0, (4 * dpx).toInt(), 0, (6 * dpx).toInt())
+    }
+
+    private fun row(text: String, marked: Boolean, onClick: () -> Unit, onLong: () -> Unit) {
+        val tv = TextView(context).apply {
+            this.text = (if (marked) "📌 " else "") + text.replace("\n", " ")
+            textSize = 15f
+            maxLines = 2
+            setTextColor(pal.text)
+            textDirection = View.TEXT_DIRECTION_ANY_RTL
+            setPadding((14 * dpx).toInt(), (10 * dpx).toInt(), (14 * dpx).toInt(), (10 * dpx).toInt())
+            background = roundBg(pal.func, 12 * dpx)
+            setOnClickListener { onClick() }
+            setOnLongClickListener { onLong(); true }
         }
-        for (c in clips) {
-            val tv = TextView(context).apply {
-                text = c.replace("\n", " ")
-                textSize = 15f
-                maxLines = 2
-                setTextColor(pal.text)
-                textDirection = View.TEXT_DIRECTION_ANY_RTL
-                setPadding((14 * dpx).toInt(), (10 * dpx).toInt(), (14 * dpx).toInt(), (10 * dpx).toInt())
-                background = roundBg(pal.func, 12 * dpx)
-                setOnClickListener { actions.insertClip(c) }
+        val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        lp.setMargins((8 * dpx).toInt(), 0, (8 * dpx).toInt(), (6 * dpx).toInt())
+        list.addView(tv, lp)
+    }
+
+    private fun render() {
+        for ((i, tv) in listOf(tabClip, tabPhrases).withIndex()) {
+            val on = i == tab
+            tv.setTextColor(if (on) pal.onAccent else pal.text)
+            tv.background = if (on) roundBg(pal.accent, 17 * dpx) else null
+        }
+        list.removeAllViews()
+        if (tab == 0) {
+            val ordered = pins + clips.filter { it !in pins }
+            if (ordered.isEmpty()) {
+                list.addView(hint("سجل الحافظة فارغ. انسخ نصاً وسيظهر هنا."))
+                return
+            }
+            list.addView(hint("اضغط للإدراج • اضغط مطوّلاً للتثبيت أو إلغاء التثبيت"))
+            for (c in ordered) row(c, c in pins, { actions.insertClip(c) }, { actions.pinClip(c) })
+        } else {
+            val add = TextView(context).apply {
+                text = "＋ حفظ النص المكتوب حالياً كعبارة"
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                gravity = Gravity.CENTER
+                setTextColor(pal.onAccent)
+                background = roundBg(pal.accent, 12 * dpx)
+                setPadding(0, (10 * dpx).toInt(), 0, (10 * dpx).toInt())
+                setOnClickListener { actions.savePhraseFromCurrent() }
             }
             val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             lp.setMargins((8 * dpx).toInt(), 0, (8 * dpx).toInt(), (6 * dpx).toInt())
-            list.addView(tv, lp)
+            list.addView(add, lp)
+            if (phrases.isEmpty()) {
+                list.addView(hint("لا توجد عبارات. اكتب جملة ثم احفظها هنا، أو أضف عباراتك من الإعدادات."))
+                return
+            }
+            list.addView(hint("اضغط للإدراج • اضغط مطوّلاً للحذف"))
+            for (p in phrases) row(p, false, { actions.insertClip(p) }, { actions.deletePhrase(p) })
         }
     }
 }

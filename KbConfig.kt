@@ -3,36 +3,50 @@ package com.arabickb.shaped
 import android.content.Context
 import android.content.SharedPreferences
 import android.content.res.Configuration
+import android.graphics.Color
 
 /** كل إعدادات الكيبورد تُقرأ من هنا (من SharedPreferences). */
 class KbConfig(
     val themeMode: Int,      // 0 نظام، 1 فاتح، 2 داكن، 3 أسود AMOLED
-    val accent: Int,         // رقم لون التمييز
-    val radius: Float,       // استدارة المفاتيح dp
-    val gap: Float,          // المسافة بين المفاتيح dp
-    val keyHeight: Float,    // ارتفاع المفتاح dp
-    val fontScale: Float,    // حجم الخط (1.0 = عادي)
-    val widthPct: Int,       // عرض الكيبورد %
+    val accent: Int,
+    val radius: Float,
+    val gap: Float,
+    val keyHeight: Float,
+    val fontScale: Float,
+    val widthPct: Int,
     val align: Int,          // 0 يسار، 1 وسط، 2 يمين
-    val numbers: Boolean,    // صف أرقام مستقل (وإلا تظهر الأرقام كتلميحات على الصف الأول)
-    val hints: Boolean,      // إظهار تلميحات البدائل
-    val flip: Boolean,       // قلب أماكن مفاتيح الوظائف
+    val numbers: Boolean,
+    val hints: Boolean,
+    val flip: Boolean,
     val haptic: Boolean,
     val sound: Boolean,
     val longPressMs: Int,
     val repeatMs: Int,
-    val swipeSpace: Boolean, // تحريك المؤشر بالسحب على المسافة
-    val doubleSpace: Boolean,// مسافتان = نقطة
-    val toolbar: Int,        // محجوز
-    val edge: Boolean,       // حافة سفلية للمفاتيح
-    val preview: Boolean,    // فقاعة معاينة الحرف
+    val swipeSpace: Boolean,
+    val doubleSpace: Boolean,
+    val edge: Boolean,
+    val preview: Boolean,
     val digits: Int,         // 0 لاتيني، 1 عربي، 2 فارسي
-    val funcRound: Boolean,  // مفاتيح الوظائف بيضاوية
+    val funcRound: Boolean,
     val bgMode: Int,         // 0 لون الثيم، 1 تدرّج، 2 صورة
     val bgGrad: Int,
-    val bgDim: Int,          // تعتيم الصورة %
-    val keyAlpha: Int,       // شفافية المفاتيح %
-    val previewRow: Boolean, // سطر المعاينة
+    val bgDim: Int,
+    val bgSplit: Boolean,    // خلفية مختلفة للكتابة المعكوسة
+    val bgModeR: Int,
+    val bgGradR: Int,
+    val bgDimR: Int,
+    val keyAlpha: Int,
+    val previewRow: Boolean,
+    val split: Boolean,      // كيبورد منقسم
+    val splitGap: Int,       // عرض الفراغ الأوسط %
+    val wrapLen: Int,        // تقسيم الأسطر الطويلة (0 = معطّل)
+    val suggest: Boolean,    // اقتراح الكلمات
+    val autoFix: Boolean,    // تصحيح الأخطاء الشائعة
+    val cKey: Int?,
+    val cFunc: Int?,
+    val cBg: Int?,
+    val cAccent: Int?,
+    val cText: Int?,
     val night: Boolean,
 ) {
     val amoled: Boolean get() = themeMode == 3
@@ -40,6 +54,8 @@ class KbConfig(
     companion object {
         fun systemNight(ctx: Context): Boolean =
             (ctx.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+
+        private fun opt(p: SharedPreferences, k: String): Int? = if (p.contains(k)) p.getInt(k, 0) else null
 
         fun load(p: SharedPreferences, ctx: Context): KbConfig {
             val mode = p.getInt("theme", 0)
@@ -66,7 +82,6 @@ class KbConfig(
                 repeatMs = p.getInt("repeatms", 45),
                 swipeSpace = p.getBoolean("swipe", true),
                 doubleSpace = p.getBoolean("dspace", true),
-                toolbar = p.getInt("toolbar", 0),
                 edge = p.getBoolean("edge", true),
                 preview = p.getBoolean("preview", true),
                 digits = p.getInt("digits", 1),
@@ -74,8 +89,22 @@ class KbConfig(
                 bgMode = p.getInt("bgmode", 0),
                 bgGrad = p.getInt("bggrad", 0),
                 bgDim = p.getInt("bgdim", 30),
+                bgSplit = p.getBoolean("bgsplit", false),
+                bgModeR = p.getInt("bgmode_r", 0),
+                bgGradR = p.getInt("bggrad_r", 0),
+                bgDimR = p.getInt("bgdim_r", 30),
                 keyAlpha = p.getInt("keyalpha", 100),
                 previewRow = p.getBoolean("prow", true),
+                split = p.getBoolean("split", false),
+                splitGap = p.getInt("splitgap", 20),
+                wrapLen = p.getInt("wrap", 0),
+                suggest = p.getBoolean("suggest", true),
+                autoFix = p.getBoolean("autofix", true),
+                cKey = opt(p, "c_key"),
+                cFunc = opt(p, "c_func"),
+                cBg = opt(p, "c_bg"),
+                cAccent = opt(p, "c_accent"),
+                cText = opt(p, "c_text"),
                 night = night,
             )
         }
@@ -108,7 +137,23 @@ class Palette(
             0xFFFFB066.toInt(), 0xFF22D3EE.toInt(),
         )
 
-        fun of(c: KbConfig): Palette {
+        private fun shade(c: Int, f: Float): Int =
+            Color.argb(255, (Color.red(c) * f).toInt().coerceIn(0, 255), (Color.green(c) * f).toInt().coerceIn(0, 255), (Color.blue(c) * f).toInt().coerceIn(0, 255))
+
+        private fun blend(a: Int, b: Int, t: Float): Int =
+            Color.argb(
+                255,
+                (Color.red(a) * (1 - t) + Color.red(b) * t).toInt(),
+                (Color.green(a) * (1 - t) + Color.green(b) * t).toInt(),
+                (Color.blue(a) * (1 - t) + Color.blue(b) * t).toInt(),
+            )
+
+        private fun contrastOn(c: Int): Int {
+            val lum = (0.299 * Color.red(c) + 0.587 * Color.green(c) + 0.114 * Color.blue(c)) / 255.0
+            return if (lum > 0.6) 0xFF101418.toInt() else 0xFFFFFFFF.toInt()
+        }
+
+        private fun base(c: KbConfig): Palette {
             val i = c.accent.coerceIn(0, DAY.size - 1)
             return when {
                 c.amoled -> Palette(
@@ -124,6 +169,27 @@ class Palette(
                     0xFF16181D.toInt(), 0xFF7B8190.toInt(), 0xFFB5BBC9.toInt(), DAY[i], 0xFFFFFFFF.toInt(),
                 )
             }
+        }
+
+        /** الألوان الأساسية للثيم، ثم تُطبَّق فوقها الألوان المخصصة إن وُجدت. */
+        fun of(c: KbConfig): Palette {
+            val b = base(c)
+            val ck = c.cKey
+            val cf = c.cFunc
+            val cb = c.cBg
+            val ca = c.cAccent
+            val ct = c.cText
+            if (ck == null && cf == null && cb == null && ca == null && ct == null) return b
+            val key = ck ?: b.key
+            val func = cf ?: b.func
+            val bg = cb ?: b.bg
+            val accent = ca ?: b.accent
+            val text = ct ?: b.text
+            val pressed = if (ck != null || cf != null) blend(func, text, 0.2f) else b.pressed
+            val edge = if (ck != null) shade(key, 0.75f) else b.edge
+            val hint = if (ct != null) blend(text, bg, 0.45f) else b.hint
+            val onAccent = if (ca != null) contrastOn(accent) else b.onAccent
+            return Palette(bg, key, func, pressed, text, hint, edge, accent, onAccent)
         }
     }
 }

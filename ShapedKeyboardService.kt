@@ -43,10 +43,16 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
     private lateinit var btnExt: TextView
     private lateinit var btnEn: TextView
     private lateinit var btnAr: TextView
+    private lateinit var suggestRow: LinearLayout
+    private val sugViews = ArrayList<TextView>()
+    private lateinit var suggester: Suggester
+    private var rootView: BgLinearLayout? = null
     private var emojiPanel: EmojiPanel? = null
     private var clipPanel: ClipPanel? = null
 
     private val clips = ArrayList<String>()
+    private val pins = ArrayList<String>()
+    private val phrases = ArrayList<String>()
     private var clipMgr: ClipboardManager? = null
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener { captureClip() }
 
@@ -55,9 +61,27 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
     override fun onCreate() {
         super.onCreate()
         prefs = getSharedPreferences("kb", Context.MODE_PRIVATE)
-        clips.addAll((prefs.getString("clips", "") ?: "").split("\u0001").filter { it.isNotEmpty() })
+        suggester = Suggester(prefs)
+        loadLists()
         clipMgr = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipMgr?.addPrimaryClipChangedListener(clipListener)
+    }
+
+    private fun readList(key: String): List<String> =
+        (prefs.getString(key, "") ?: "").split("\u0001").filter { it.isNotEmpty() }
+
+    private fun saveList(key: String, list: List<String>) {
+        prefs.edit().putString(key, list.joinToString("\u0001")).apply()
+    }
+
+    private fun loadLists() {
+        clips.clear(); clips.addAll(readList("clips"))
+        pins.clear(); pins.addAll(readList("pins"))
+        phrases.clear(); phrases.addAll(readList("phrases"))
+    }
+
+    private fun refreshPanels() {
+        clipPanel?.setData(clips, pins, phrases)
     }
 
     override fun onDestroy() {
@@ -112,7 +136,8 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
             orientation = LinearLayout.VERTICAL
             layoutDirection = View.LAYOUT_DIRECTION_LTR
         }
-        root.applyBg(cfg)
+        root.applyBg(cfg, converting)
+        rootView = root
 
         // ===== الشريط العلوي (أيقونات) =====
         val strip = LinearLayout(this).apply {
@@ -179,6 +204,32 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         previewRow.addView(actionPill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(30f)))
         root.addView(previewRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
+        // ===== شريط اقتراح الكلمات =====
+        suggestRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8f), 0, dp(8f), dp(2f))
+            visibility = if (cfg.suggest) View.VISIBLE else View.GONE
+        }
+        sugViews.clear()
+        for (i in 0 until 3) {
+            val tv = TextView(this).apply {
+                textSize = 17f
+                gravity = Gravity.CENTER
+                maxLines = 1
+                setTextColor(pal.text)
+                background = bg(withA(pal.key, 200), 14)
+                textDirection = View.TEXT_DIRECTION_ANY_RTL
+                setOnClickListener { (tag as? String)?.let { w -> applySuggestion(w) } }
+            }
+            sugViews.add(tv)
+            val lp = LinearLayout.LayoutParams(0, dp(36f), 1f)
+            lp.marginStart = dp(3f)
+            lp.marginEnd = dp(3f)
+            suggestRow.addView(tv, lp)
+        }
+        root.addView(suggestRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
         // ===== المحتوى: الكيبورد + اللوحات =====
         keyboard = KeyboardView(this, cfg).apply { listener = this@ShapedKeyboardService }
         val content = FrameLayout(this)
@@ -189,7 +240,7 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         emojiPanel = ep
         val cp = ClipPanel(this, pal, this)
         cp.visibility = View.GONE
-        cp.setClips(clips)
+        cp.setData(clips, pins, phrases)
         content.addView(cp, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         clipPanel = cp
         root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, keyboard.heightPx()))
@@ -203,7 +254,7 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         keyboard.visibility = if (mode == 0) View.VISIBLE else View.INVISIBLE
         emojiPanel?.visibility = if (mode == 1) View.VISIBLE else View.GONE
         clipPanel?.visibility = if (mode == 2) View.VISIBLE else View.GONE
-        if (mode == 2) clipPanel?.setClips(clips)
+        if (mode == 2) refreshPanels()
         updateUi()
     }
 
@@ -238,13 +289,17 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
             deferred -> "اكتب ثم اضغط إدراج أو Enter"
             else -> "الكتابة المعكوسة مفعّلة — ما تكتبه يظهر هنا مقروءاً"
         }
+        updateSuggestions()
     }
 
     override fun onStartInputView(info: EditorInfo, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         resetSegment()
         // إن غيّر المستخدم الإعدادات نعيد بناء الواجهة
-        if (prefs.getLong("stamp", 0L) != lastStamp) setInputView(onCreateInputView())
+        if (prefs.getLong("stamp", 0L) != lastStamp) {
+            suggester = Suggester(prefs)
+            setInputView(onCreateInputView())
+        }
         val cls = info.inputType and EditorInfo.TYPE_MASK_CLASS
         val v = info.inputType and EditorInfo.TYPE_MASK_VARIATION
         val password = cls == EditorInfo.TYPE_CLASS_TEXT && (v == EditorInfo.TYPE_TEXT_VARIATION_PASSWORD ||
@@ -253,6 +308,8 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         converting = prefs.getBoolean("convert", true)
         deferred = prefs.getBoolean("deferred", false)
         gameMode = prefs.getBoolean("game", false)
+        loadLists()
+        rootView?.applyBg(cfg, converting)
         captureClip()
         showPanel(0)
     }
@@ -263,6 +320,9 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
     }
 
     private fun active() = converting && !rawField
+
+    private fun shapeFor(t: String): String =
+        if (cfg.wrapLen > 0) ArabicShaper.shapeWrapped(t, cfg.wrapLen) else ArabicShaper.shape(t)
 
     private fun resetSegment() { logical.setLength(0); shown = "" }
 
@@ -283,7 +343,7 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
 
     private fun refresh() {
         val ic = currentInputConnection ?: return
-        val out = ArabicShaper.shape(logical.toString())
+        val out = shapeFor(logical.toString())
         if (gameMode) {
             deleteShown()
             ic.commitText(out, 1)
@@ -297,7 +357,63 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         updateUi()
     }
 
+    private fun isWordChar(c: Char) = Character.isLetterOrDigit(c) || c in '\u064B'..'\u0652' || c == '\u0640'
+
+    private fun wordAtEnd(s: CharSequence): String {
+        var i = s.length
+        while (i > 0 && isWordChar(s[i - 1])) i--
+        return s.subSequence(i, s.length).toString()
+    }
+
+    private fun currentWord(): String =
+        if (active()) wordAtEnd(logical)
+        else (currentInputConnection?.getTextBeforeCursor(40, 0)?.let { wordAtEnd(it) } ?: "")
+
+    /** عند إنهاء كلمة بمسافة: تصحيح الخطأ الشائع، وتعلّم الكلمة. */
+    private fun finishWord() {
+        val w = wordAtEnd(logical)
+        if (w.isEmpty()) return
+        var out = w
+        if (cfg.autoFix) {
+            val f = suggester.fix(w)
+            if (f != null) {
+                logical.setLength(logical.length - w.length)
+                logical.append(f)
+                out = f
+            }
+        }
+        if (cfg.suggest && out.length >= 2) suggester.learn(out)
+    }
+
+    private fun updateSuggestions() {
+        if (!cfg.suggest) return
+        val w = if (panelMode == 0 && !rawField) currentWord() else ""
+        val list: List<String> = if (w.isEmpty()) emptyList<String>() else suggester.suggest(w, 3)
+        for (i in 0 until sugViews.size) {
+            val t = list.getOrNull(i)
+            sugViews[i].text = t ?: ""
+            sugViews[i].tag = t
+        }
+    }
+
+    private fun applySuggestion(word: String) {
+        if (active() && !deferred && !segmentIntact()) resetSegment()
+        val w = currentWord()
+        if (active()) {
+            logical.setLength(logical.length - w.length)
+            logical.append(word).append(' ')
+            if (deferred) updateUi() else refresh()
+        } else {
+            val ic = currentInputConnection ?: return
+            if (w.isNotEmpty()) ic.deleteSurroundingText(w.length, 0)
+            ic.commitText("$word ", 1)
+        }
+        if (cfg.suggest) suggester.learn(word)
+        updateSuggestions()
+    }
+
     private fun appendLogical(text: String) {
+        if (text == " ") finishWord()
         val n = logical.length
         if (text == " " && cfg.doubleSpace && n >= 2 && logical[n - 1] == ' ' && logical[n - 2] !in " .،؟!?:;\n") {
             logical.setLength(n - 1)
@@ -308,7 +424,21 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
     }
 
     override fun onText(text: String) {
-        if (!active()) { currentInputConnection?.commitText(text, 1); return }
+        if (!active()) {
+            val ic = currentInputConnection
+            if (text == " " && !rawField && (cfg.suggest || cfg.autoFix)) {
+                val w = currentWord()
+                if (w.isNotEmpty()) {
+                    val f = if (cfg.autoFix) suggester.fix(w) else null
+                    if (f != null) { ic?.deleteSurroundingText(w.length, 0); ic?.commitText(f, 1) }
+                    val done = f ?: w
+                    if (cfg.suggest && done.length >= 2) suggester.learn(done)
+                }
+            }
+            ic?.commitText(text, 1)
+            updateSuggestions()
+            return
+        }
         if (text == "\n") { onEnter(); return }
         if (deferred) { appendLogical(text); updateUi(); return }
         if (!segmentIntact()) resetSegment()
@@ -336,7 +466,7 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
 
     private fun insertPending() {
         if (logical.isEmpty()) return
-        val out = if (active()) ArabicShaper.shape(logical.toString()) else logical.toString()
+        val out = if (active()) shapeFor(logical.toString()) else logical.toString()
         currentInputConnection?.commitText(out, 1)
         resetSegment()
         updateUi()
@@ -344,6 +474,10 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
 
     override fun onEnter() {
         if (deferred && active() && logical.isNotEmpty()) { insertPending(); return }
+        if (active() && cfg.suggest) {
+            val w = wordAtEnd(logical)
+            if (w.length >= 2) suggester.learn(w)
+        }
         resetSegment()
         updateUi()
         val ei = currentInputEditorInfo
@@ -372,6 +506,7 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         if (deferred) insertPending()
         converting = on
         prefs.edit().putBoolean("convert", on).apply()
+        rootView?.applyBg(cfg, converting)
         resetSegment()
         updateUi()
     }
@@ -404,7 +539,7 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
     private fun commitConverted(t: String) {
         if (t.isEmpty()) return
         if (deferred) insertPending() else resetSegment()
-        currentInputConnection?.commitText(if (active()) ArabicShaper.shape(t) else t, 1)
+        currentInputConnection?.commitText(if (active()) shapeFor(t) else t, 1)
         updateUi()
     }
 
@@ -418,8 +553,34 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
 
     override fun clearClips() {
         clips.clear()
-        prefs.edit().putString("clips", "").apply()
-        clipPanel?.setClips(clips)
+        saveList("clips", clips)
+        refreshPanels()
+    }
+
+    override fun pinClip(text: String) {
+        if (!pins.remove(text)) pins.add(0, text)
+        saveList("pins", pins)
+        refreshPanels()
+    }
+
+    override fun savePhraseFromCurrent() {
+        val t = logical.toString().trim()
+        if (t.isEmpty()) {
+            android.widget.Toast.makeText(this, "اكتب جملة أولاً ثم احفظها", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        phrases.remove(t)
+        phrases.add(0, t)
+        while (phrases.size > 50) phrases.removeAt(phrases.size - 1)
+        saveList("phrases", phrases)
+        refreshPanels()
+        android.widget.Toast.makeText(this, "تم حفظ العبارة", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    override fun deletePhrase(text: String) {
+        phrases.remove(text)
+        saveList("phrases", phrases)
+        refreshPanels()
     }
 
     private fun captureClip() {
@@ -429,8 +590,8 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
                 clips.remove(t)
                 clips.add(0, t)
                 while (clips.size > 20) clips.removeAt(clips.size - 1)
-                prefs.edit().putString("clips", clips.joinToString("\u0001")).apply()
-                clipPanel?.setClips(clips)
+                saveList("clips", clips)
+                refreshPanels()
             }
         } catch (e: Throwable) {
             // بعض الأجهزة تمنع قراءة الحافظة أحياناً؛ نتجاهل

@@ -87,18 +87,31 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
             else -> (w - contentW) / 2f
         }
         val rowH = (totalHeight() - 2 * pad - (rows.size - 1) * gap) / rows.size
+        val gapMid = if (cfg.split) contentW * cfg.splitGap.coerceIn(5, 40) / 100f else 0f
         val out = ArrayList<List<Cell>>()
         rows.forEachIndexed { ri, row ->
             val total = row.sumOf { it.weight.toDouble() }.toFloat()
-            val avail = contentW - 2 * pad - gap * (row.size - 1)
+            // الكيبورد المنقسم: فراغ في منتصف كل صف (عدا الصف الأخير)
+            var mid = -1
+            if (cfg.split && ri < rows.size - 1 && row.size >= 6) {
+                var cum = 0.0
+                for (j in row.indices) {
+                    if (cum + row[j].weight / 2.0 >= total / 2.0) { mid = j; break }
+                    cum += row[j].weight
+                }
+            }
+            val avail = contentW - 2 * pad - gap * (row.size - 1) - (if (mid > 0) gapMid else 0f)
             var x = left + pad
             val y = pad + ri * (rowH + gap)
-            out.add(row.map { key ->
-                val kw = avail * key.weight / total
-                val c = Cell(key, RectF(x, y, x + kw, y + rowH), ri)
-                x += kw + gap
-                c
-            })
+            out.add(
+                row.mapIndexed { j, key ->
+                    if (j == mid && mid > 0) x += gapMid
+                    val kw = avail * key.weight / total
+                    val c = Cell(key, RectF(x, y, x + kw, y + rowH), ri)
+                    x += kw + gap
+                    c
+                },
+            )
         }
         cells = out
     }
