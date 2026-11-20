@@ -1,7 +1,9 @@
 package com.arabickb.shaped
 
 import android.content.Context
-import android.graphics.*
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -9,35 +11,20 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.SoundEffectConstants
 import android.view.View
+import kotlin.math.abs
 
-class Palette(
-    val bg: Int, val key: Int, val func: Int, val pressed: Int,
-    val text: Int, val hint: Int, val accent: Int, val onAccent: Int,
-) {
-    companion object {
-        fun of(night: Boolean) = if (night)
-            Palette(0xFF16171B.toInt(), 0xFF2B2D33.toInt(), 0xFF3A3D45.toInt(), 0xFF4C505B.toInt(),
-                0xFFF1F2F6.toInt(), 0xFF8A8F9C.toInt(), 0xFF7C9BFF.toInt(), 0xFF0B1230.toInt())
-        else
-            Palette(0xFFE4E7EE.toInt(), 0xFFFFFFFF.toInt(), 0xFFCBD0DB.toInt(), 0xFFB4BBCB.toInt(),
-                0xFF16181D.toInt(), 0xFF7B8190.toInt(), 0xFF3F5EFB.toInt(), 0xFFFFFFFF.toInt())
-    }
-}
-
-class KeyboardView(context: Context, night: Boolean) : View(context) {
+class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) {
     interface Listener {
         fun onText(text: String)
         fun onDelete()
         fun onEnter()
         fun onLangLongPress()
+        fun onCursor(dir: Int)
+        fun onLayerChanged() {}
     }
 
     var listener: Listener? = null
-    var keyHeightDp = 56f
-        set(v) { field = v; requestLayout() }
-    var haptic = true
-    var sound = false
-    private val pal = Palette.of(night)
+    private var pal = Palette.of(cfg)
     private var layer = Layer.AR
     private var lastLetters = Layer.AR
     private var shift = 0 // 0 = off, 1 = once, 2 = lock
@@ -45,10 +32,9 @@ class KeyboardView(context: Context, night: Boolean) : View(context) {
 
     private class Cell(val key: Key, val r: RectF, val row: Int)
     private var cells: List<List<Cell>> = emptyList()
-    private var rowCount = 5
     private var cachedRows: List<List<Key>> = emptyList()
 
-    private inner class Press(val cell: Cell) {
+    private inner class Press(val cell: Cell, var lastX: Float) {
         var longDone = false
         var job: Runnable? = null
     }
@@ -62,45 +48,80 @@ class KeyboardView(context: Context, night: Boolean) : View(context) {
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val txt = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    private val tmp = RectF()
 
     private fun dp(v: Float) = v * resources.displayMetrics.density
-    private fun sp(v: Float) = v * resources.displayMetrics.scaledDensity
+    private fun sp(v: Float) = v * resources.displayMetrics.scaledDensity * cfg.fontScale
+    private fun alpha(color: Int): Int = (((color ushr 24) * cfg.keyAlpha.coerceIn(20, 100) / 100) shl 24) or (color and 0x00FFFFFF)
 
     init { rebuild() }
 
+    fun applyConfig(c: KbConfig) {
+        cfg = c
+        pal = Palette.of(c)
+        rebuild()
+        requestLayout()
+    }
+
+    private fun totalHeight(): Float = dp(8f) * 2 + 5 * dp(cfg.keyHeight) + 4 * dp(cfg.gap)
+    fun heightPx(): Int = totalHeight().toInt()
+
+    fun isEnglish(): Boolean = layer == Layer.EN || (layer in listOf(Layer.NUM, Layer.SYM1, Layer.SYM2) && lastLetters == Layer.EN)
+    fun isExtLayer(): Boolean = layer == Layer.AR_EXT
+    fun showLanguage(english: Boolean) = setLayer(if (english) Layer.EN else Layer.AR)
+    fun toggleExtLayer() = setLayer(if (layer == Layer.AR_EXT) Layer.AR else Layer.AR_EXT)
+
     private fun rebuild() {
-        val rows = Layouts.rows(layer, shift != 0, lastLetters)
-        rowCount = rows.size
-        layoutCells(rows, width)
+        layoutCells(Layouts.rows(layer, shift != 0, lastLetters, cfg), width)
         invalidate()
     }
 
     private fun layoutCells(rows: List<List<Key>>, w: Int) {
         cachedRows = rows
-        val pad = dp(8f); val gap = dp(6f); val kh = dp(keyHeightDp)
+        val pad = dp(8f)
+        val gap = dp(cfg.gap)
+        val contentW = w * cfg.widthPct.coerceIn(40, 100) / 100f
+        val left = when (cfg.align) {
+            0 -> 0f
+            2 -> w - contentW
+            else -> (w - contentW) / 2f
+        }
+        val rowH = (totalHeight() - 2 * pad - (rows.size - 1) * gap) / rows.size
+        val gapMid = if (cfg.split) contentW * cfg.splitGap.coerceIn(5, 40) / 100f else 0f
         val out = ArrayList<List<Cell>>()
         rows.forEachIndexed { ri, row ->
             val total = row.sumOf { it.weight.toDouble() }.toFloat()
-            val avail = w - 2 * pad - gap * (row.size - 1)
-            var x = pad
-            val y = pad + ri * (kh + gap)
-            out.add(row.map { key ->
-                val kw = avail * key.weight / total
-                val c = Cell(key, RectF(x, y, x + kw, y + kh), ri)
-                x += kw + gap
-                c
-            })
+            // الكيبورد المنقسم: فراغ في منتصف كل صف (عدا الصف الأخير)
+            var mid = -1
+            if (cfg.split && ri < rows.size - 1 && row.size >= 6) {
+                var cum = 0.0
+                for (j in row.indices) {
+                    if (cum + row[j].weight / 2.0 >= total / 2.0) { mid = j; break }
+                    cum += row[j].weight
+                }
+            }
+            val avail = contentW - 2 * pad - gap * (row.size - 1) - (if (mid > 0) gapMid else 0f)
+            var x = left + pad
+            val y = pad + ri * (rowH + gap)
+            out.add(
+                row.mapIndexed { j, key ->
+                    if (j == mid && mid > 0) x += gapMid
+                    val kw = avail * key.weight / total
+                    val c = Cell(key, RectF(x, y, x + kw, y + rowH), ri)
+                    x += kw + gap
+                    c
+                },
+            )
         }
         cells = out
     }
 
     override fun onMeasure(wSpec: Int, hSpec: Int) {
-        val h = dp(8f) * 2 + rowCount * dp(keyHeightDp) + (rowCount - 1) * dp(6f)
-        setMeasuredDimension(MeasureSpec.getSize(wSpec), h.toInt())
+        setMeasuredDimension(MeasureSpec.getSize(wSpec), totalHeight().toInt())
     }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
-        layoutCells(cachedRows.ifEmpty { Layouts.rows(layer, shift != 0, lastLetters) }, w)
+        layoutCells(cachedRows.ifEmpty { Layouts.rows(layer, shift != 0, lastLetters, cfg) }, w)
     }
 
     private fun setLayer(l: Layer) {
@@ -108,46 +129,80 @@ class KeyboardView(context: Context, night: Boolean) : View(context) {
         if (l == Layer.AR || l == Layer.EN) lastLetters = l
         shift = 0
         rebuild()
+        listener?.onLayerChanged()
     }
 
-    private fun labelOf(k: Key, row: Int): String = when (k.kind) {
+    private fun labelOf(k: Key): String = when (k.kind) {
         Kind.SHIFT -> if (shift == 2) "⇪" else "⇧"
-        Kind.LANG -> if (layer == Layer.EN || (layer in listOf(Layer.SYM1, Layer.SYM2) && lastLetters == Layer.EN)) "ع" else "EN"
         else -> k.label
     }
 
+    private fun centerText(c: Canvas, s: String, r: RectF) {
+        val fm = txt.fontMetrics
+        c.drawText(s, r.centerX(), r.centerY() - (fm.ascent + fm.descent) / 2, txt)
+    }
+
     override fun onDraw(c: Canvas) {
-        c.drawColor(pal.bg)
-        val rad = dp(10f)
+        val rad = dp(cfg.radius)
         for (row in cells) for (cell in row) {
             val k = cell.key
             if (k.kind == Kind.SPACER) continue
             val isPressed = presses.values.any { it.cell === cell }
             val isFunc = k.kind != Kind.CHAR && k.kind != Kind.SPACE
-            fill.color = when {
-                isPressed -> pal.pressed
-                k.kind == Kind.ENTER -> pal.accent
-                k.kind == Kind.SHIFT && shift != 0 -> pal.accent
-                isFunc -> pal.func
-                else -> pal.key
+            val rr = if (cfg.funcRound && k.pill) cell.r.height() / 2f else rad
+            if (cfg.edge && !isPressed) {
+                tmp.set(cell.r.left, cell.r.top + dp(1.5f), cell.r.right, cell.r.bottom + dp(1.5f))
+                fill.color = alpha(pal.edge)
+                c.drawRoundRect(tmp, rr, rr, fill)
             }
-            c.drawRoundRect(cell.r, rad, rad, fill)
+            fill.color = alpha(
+                when {
+                    isPressed -> pal.pressed
+                    k.kind == Kind.ENTER -> pal.accent
+                    k.kind == Kind.SHIFT && shift != 0 -> pal.accent
+                    k.kind == Kind.EXT -> pal.func
+                    isFunc -> pal.func
+                    else -> pal.key
+                },
+            )
+            c.drawRoundRect(cell.r, rr, rr, fill)
             val onAcc = k.kind == Kind.ENTER || (k.kind == Kind.SHIFT && shift != 0)
-            txt.color = if (onAcc) pal.onAccent else pal.text
-            val label = labelOf(k, cell.row)
+            val label = labelOf(k)
             txt.textSize = when {
                 k.kind == Kind.SPACE -> sp(13f)
-                k.kind == Kind.CHAR && label.length <= 2 -> sp(22f)
+                k.kind == Kind.CHAR && label.length <= 2 -> sp(23f)
+                k.kind == Kind.SYMBOLS || k.kind == Kind.NUMBERS -> sp(17f)
                 else -> sp(16f)
             }
-            if (k.kind == Kind.SPACE) txt.color = pal.hint
-            val fm = txt.fontMetrics
-            c.drawText(label, cell.r.centerX(), cell.r.centerY() - (fm.ascent + fm.descent) / 2, txt)
-            if (k.kind == Kind.CHAR && k.alts.isNotEmpty()) {
-                txt.color = pal.hint
+            txt.color = when {
+                k.kind == Kind.SPACE -> pal.hint
+                onAcc -> pal.onAccent
+                k.kind == Kind.SYMBOLS || k.kind == Kind.NUMBERS -> pal.accent
+                k.kind == Kind.DELETE -> pal.accent
+                else -> pal.text
+            }
+            centerText(c, label, cell.r)
+            if (cfg.hints && k.kind == Kind.CHAR && k.alts.isNotEmpty()) {
+                txt.color = pal.accent
                 txt.textSize = sp(11f)
                 val f2 = txt.fontMetrics
                 c.drawText(k.alts[0], cell.r.right - dp(10f), cell.r.top + dp(6f) - f2.ascent, txt)
+            }
+        }
+        if (cfg.preview && popup == null) {
+            for (p in presses.values) {
+                val k = p.cell.key
+                if (k.kind != Kind.CHAR || p.longDone || k.text.isEmpty()) continue
+                val bw = maxOf(p.cell.r.width() * 1.3f, dp(56f))
+                val bh = p.cell.r.height() * 1.25f
+                val l = (p.cell.r.centerX() - bw / 2).coerceIn(0f, maxOf(0f, width - bw))
+                val t = maxOf(0f, p.cell.r.top - bh - dp(4f))
+                tmp.set(l, t, l + bw, t + bh)
+                fill.color = pal.accent
+                c.drawRoundRect(tmp, dp(14f), dp(14f), fill)
+                txt.color = pal.onAccent
+                txt.textSize = sp(30f)
+                centerText(c, k.label, tmp)
             }
         }
         popup?.let { p ->
@@ -156,8 +211,7 @@ class KeyboardView(context: Context, night: Boolean) : View(context) {
                 c.drawRoundRect(r, rad, rad, fill)
                 txt.color = if (i == p.hover) pal.onAccent else pal.text
                 txt.textSize = sp(24f)
-                val fm = txt.fontMetrics
-                c.drawText(p.items[i], r.centerX(), r.centerY() - (fm.ascent + fm.descent) / 2, txt)
+                centerText(c, p.items[i], r)
             }
         }
     }
@@ -177,25 +231,35 @@ class KeyboardView(context: Context, night: Boolean) : View(context) {
 
     private fun begin(id: Int, x: Float, y: Float) {
         val cell = hit(x, y) ?: return
-        val p = Press(cell)
+        val p = Press(cell, x)
         presses[id] = p
-        if (haptic) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-        if (sound) playSoundEffect(SoundEffectConstants.CLICK)
+        if (cfg.haptic) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        if (cfg.sound) playSoundEffect(SoundEffectConstants.CLICK)
         val k = cell.key
         when {
             k.kind == Kind.DELETE -> {
                 p.longDone = true
                 listener?.onDelete()
                 val rep = object : Runnable {
-                    override fun run() { listener?.onDelete(); handler.postDelayed(this, 45) }
+                    override fun run() { listener?.onDelete(); handler.postDelayed(this, cfg.repeatMs.toLong()) }
                 }
                 p.job = rep
                 handler.postDelayed(rep, 420)
             }
-            k.kind == Kind.CHAR && k.alts.isNotEmpty() || k.kind == Kind.LANG -> {
+            k.kind == Kind.CHAR && k.alts.isNotEmpty() -> {
                 val r = Runnable { longPress(id, p) }
                 p.job = r
-                handler.postDelayed(r, 380)
+                handler.postDelayed(r, cfg.longPressMs.toLong())
+            }
+            k.kind == Kind.SPACE -> {
+                val r = Runnable {
+                    p.longDone = true
+                    presses.remove(id)
+                    listener?.onLangLongPress()
+                    invalidate()
+                }
+                p.job = r
+                handler.postDelayed(r, cfg.longPressMs * 2L)
             }
         }
         invalidate()
@@ -204,12 +268,11 @@ class KeyboardView(context: Context, night: Boolean) : View(context) {
     private fun longPress(id: Int, p: Press) {
         p.longDone = true
         val k = p.cell.key
-        if (k.kind == Kind.LANG) { listener?.onLangLongPress(); presses.remove(id); invalidate(); return }
-        if (haptic) performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        if (cfg.haptic) performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
         val cw = maxOf(p.cell.r.width(), dp(52f))
         val total = cw * k.alts.size
         val x0 = (p.cell.r.centerX() - total / 2).coerceIn(dp(4f), maxOf(dp(4f), width - total - dp(4f)))
-        val kh = dp(keyHeightDp)
+        val kh = p.cell.r.height()
         val y0 = if (p.cell.row > 0) p.cell.r.top - kh - dp(6f) else p.cell.r.bottom + dp(6f)
         val rects = k.alts.indices.map { RectF(x0 + it * cw, y0, x0 + (it + 1) * cw - dp(4f), y0 + kh) }
         popup = Popup(id, k.alts, rects)
@@ -245,6 +308,17 @@ class KeyboardView(context: Context, night: Boolean) : View(context) {
                     if (pop != null && pop.pointer == id) {
                         val h = pop.hit(e.getX(i), e.getY(i))
                         if (h != pop.hover) { pop.hover = h; invalidate() }
+                    } else if (p.cell.key.kind == Kind.SPACE && cfg.swipeSpace) {
+                        val step = dp(22f)
+                        val dx = e.getX(i) - p.lastX
+                        if (abs(dx) >= step) {
+                            p.job?.let { handler.removeCallbacks(it) }
+                            val n = (abs(dx) / step).toInt()
+                            val dir = if (dx > 0) 1 else -1
+                            repeat(n) { listener?.onCursor(dir) }
+                            p.lastX += dir * n * step
+                            p.longDone = true
+                        }
                     } else {
                         val cell = hit(e.getX(i), e.getY(i))
                         if (cell?.key !== p.cell.key) {
@@ -284,9 +358,9 @@ class KeyboardView(context: Context, night: Boolean) : View(context) {
             }
             Kind.EXT -> setLayer(if (layer == Layer.AR_EXT) Layer.AR else Layer.AR_EXT)
             Kind.SYMBOLS -> setLayer(Layer.SYM1)
+            Kind.NUMBERS -> setLayer(Layer.NUM)
             Kind.LETTERS -> setLayer(lastLetters)
             Kind.SYM_PAGE -> setLayer(if (layer == Layer.SYM1) Layer.SYM2 else Layer.SYM1)
-            Kind.LANG -> setLayer(if (layer == Layer.EN || (layer in listOf(Layer.SYM1, Layer.SYM2) && lastLetters == Layer.EN)) Layer.AR else Layer.EN)
             else -> {}
         }
     }

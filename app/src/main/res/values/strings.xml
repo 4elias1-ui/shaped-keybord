@@ -1,4 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">كيبورد عربي محوّل</string>
-    <string name="ime_name">عربي محوّل</string>
+    <string name="app_name">كيبورد عربي مشكّل</string>
+    <string name="ime_name">كيبورد عربي مشكّل</string>
 </resources>

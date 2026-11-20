@@ -133,6 +133,30 @@ object ArabicShaper {
         else -> N
     }
 
+    /** يقسّم الأسطر الأطول من max حرفاً عند المسافات (قبل التحويل، ليُقلب كل سطر وحده). */
+    fun wrap(text: String, max: Int): String {
+        if (max <= 0) return text
+        return text.split("\n").joinToString("\n") { wrapLine(it, max) }
+    }
+
+    private fun wrapLine(line: String, max: Int): String {
+        if (line.length <= max) return line
+        val sb = StringBuilder()
+        var cur = 0
+        for (w in line.split(" ")) {
+            if (cur == 0) {
+                sb.append(w); cur = w.length
+            } else if (cur + 1 + w.length <= max) {
+                sb.append(' ').append(w); cur += 1 + w.length
+            } else {
+                sb.append('\n').append(w); cur = w.length
+            }
+        }
+        return sb.toString()
+    }
+
+    fun shapeWrapped(text: String, max: Int): String = shape(wrap(text, max))
+
     /** يحوّل النص كاملاً (كل سطر على حدة). */
     fun shape(text: String): String = text.replace("\r", "").split("\n").joinToString("\n") { shapeLine(it) }
 
