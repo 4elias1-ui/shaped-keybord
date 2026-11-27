@@ -2,11 +2,17 @@ package com.arabickb.shaped
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.Typeface
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.SoundEffectConstants
@@ -17,6 +23,7 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
     interface Listener {
         fun onText(text: String)
         fun onDelete()
+        fun onDeleteWord() {}
         fun onEnter()
         fun onLangLongPress()
         fun onCursor(dir: Int)
@@ -30,29 +37,72 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
     private var shift = 0 // 0 = off, 1 = once, 2 = lock
     private var lastShiftTap = 0L
 
-    private class Cell(val key: Key, val r: RectF, val row: Int)
+    private class Cell(val key: Key, val r: RectF, val row: Int) {
+        var grad: LinearGradient? = null
+        var gradBase = 0
+    }
     private var cells: List<List<Cell>> = emptyList()
     private var cachedRows: List<List<Key>> = emptyList()
 
-    private inner class Press(val cell: Cell, var lastX: Float) {
+    private inner class Press(val cell: Cell, val startX: Float, val startY: Float) {
+        var lastX = startX
+        val t0 = SystemClock.uptimeMillis()
         var longDone = false
         var job: Runnable? = null
     }
-    private class Popup(val pointer: Int, val items: List<String>, val rects: List<RectF>) {
+
+    private class Popup(
+        val pointer: Int,
+        val items: List<String>,
+        val rects: List<RectF>,
+        val box: RectF,
+        val below: Boolean,
+        val cellTop: Float,
+        val cellBottom: Float,
+    ) {
         var hover = -1
-        fun hit(x: Float, y: Float) = rects.indexOfFirst { it.contains(x, y) }
+        fun nearest(x: Float): Int {
+            var best = 0
+            var bd = Float.MAX_VALUE
+            for (i in rects.indices) {
+                val d = abs(rects[i].centerX() - x)
+                if (d < bd) { bd = d; best = i }
+            }
+            return best
+        }
     }
+
+    private class Fade(val rect: RectF, val label: String, val t: Long)
+
     private val presses = HashMap<Int, Press>()
     private var popup: Popup? = null
+    private val releasedAt = HashMap<Cell, Long>()
+    private val fades = ArrayList<Fade>()
     private val handler = Handler(Looper.getMainLooper())
+    private val vibrator: Vibrator? = try { context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator } catch (e: Throwable) { null }
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val txt = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
     private val tmp = RectF()
+    private val tmp2 = RectF()
 
     private fun dp(v: Float) = v * resources.displayMetrics.density
     private fun sp(v: Float) = v * resources.displayMetrics.scaledDensity * cfg.fontScale
-    private fun alpha(color: Int): Int = (((color ushr 24) * cfg.keyAlpha.coerceIn(20, 100) / 100) shl 24) or (color and 0x00FFFFFF)
+
+    private fun lerp(a: Int, b: Int, t: Float): Int {
+        val k = t.coerceIn(0f, 1f)
+        return Color.argb(
+            (Color.alpha(a) + (Color.alpha(b) - Color.alpha(a)) * k).toInt(),
+            (Color.red(a) + (Color.red(b) - Color.red(a)) * k).toInt(),
+            (Color.green(a) + (Color.green(b) - Color.green(a)) * k).toInt(),
+            (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * k).toInt(),
+        )
+    }
+
+    private fun withAlpha(c: Int, a: Int) = (c and 0x00FFFFFF) or (a.coerceIn(0, 255) shl 24)
+    private fun scaleAlpha(c: Int, f: Float) = withAlpha(c, (Color.alpha(c) * f).toInt())
+    private fun keyAlpha(c: Int): Int = withAlpha(c, Color.alpha(c) * cfg.keyAlpha.coerceIn(20, 100) / 100)
 
     init { rebuild() }
 
@@ -66,10 +116,18 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
     private fun totalHeight(): Float = dp(8f) * 2 + 5 * dp(cfg.keyHeight) + 4 * dp(cfg.gap)
     fun heightPx(): Int = totalHeight().toInt()
 
-    fun isEnglish(): Boolean = layer == Layer.EN || (layer in listOf(Layer.NUM, Layer.SYM1, Layer.SYM2) && lastLetters == Layer.EN)
+    fun isEnglish(): Boolean =
+        layer == Layer.EN || (layer in listOf(Layer.NUM, Layer.SYM1, Layer.SYM2) && lastLetters == Layer.EN)
     fun isExtLayer(): Boolean = layer == Layer.AR_EXT
     fun showLanguage(english: Boolean) = setLayer(if (english) Layer.EN else Layer.AR)
     fun toggleExtLayer() = setLayer(if (layer == Layer.AR_EXT) Layer.AR else Layer.AR_EXT)
+    fun showNumbers() { if (layer != Layer.NUM) setLayer(Layer.NUM) }
+    fun backToLetters() { if (layer == Layer.NUM || layer == Layer.SYM1 || layer == Layer.SYM2) setLayer(lastLetters) }
+
+    /** يفعّل Shift لمرة واحدة تلقائياً (بداية الجملة) دون إشعار المستمع. */
+    fun autoShift(on: Boolean) {
+        if (on && layer == Layer.EN && shift == 0) { shift = 1; rebuild() }
+    }
 
     private fun rebuild() {
         layoutCells(Layouts.rows(layer, shift != 0, lastLetters, cfg), width)
@@ -91,7 +149,6 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
         val out = ArrayList<List<Cell>>()
         rows.forEachIndexed { ri, row ->
             val total = row.sumOf { it.weight.toDouble() }.toFloat()
-            // الكيبورد المنقسم: فراغ في منتصف كل صف (عدا الصف الأخير)
             var mid = -1
             if (cfg.split && ri < rows.size - 1 && row.size >= 6) {
                 var cum = 0.0
@@ -137,35 +194,158 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
         else -> k.label
     }
 
+    /** الحركات تُعرض فوق تطويلة ليسهل رؤيتها. */
+    private fun display(s: String): String =
+        if (s.isNotEmpty() && s.all { it in '\u064B'..'\u0652' || it == '\u0670' }) "ـ$s" else s
+
     private fun centerText(c: Canvas, s: String, r: RectF) {
         val fm = txt.fontMetrics
         c.drawText(s, r.centerX(), r.centerY() - (fm.ascent + fm.descent) / 2, txt)
     }
 
+    // ===== الاهتزاز =====
+    private fun buzz() {
+        if (!cfg.haptic) return
+        val v = vibrator
+        if (cfg.vibMs > 0 && v != null) {
+            try {
+                v.vibrate(VibrationEffect.createOneShot(cfg.vibMs.toLong(), VibrationEffect.DEFAULT_AMPLITUDE))
+                return
+            } catch (e: Throwable) {
+                // نكمل بالاهتزاز العادي
+            }
+        }
+        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
+    // ===== الرسم =====
+    /** مستوى الضغط من 0 إلى 1 (يرتفع بسرعة عند اللمس وينزل بنعومة عند الرفع). */
+    private fun pressLevel(cell: Cell, now: Long): Float {
+        for (p in presses.values) {
+            if (p.cell === cell) return ((now - p.t0) / 60f).coerceIn(0f, 1f)
+        }
+        val tr = releasedAt[cell] ?: return 0f
+        return 1f - ((now - tr) / 170f).coerceIn(0f, 1f)
+    }
+
+    private fun gradFor(cell: Cell, base: Int): LinearGradient {
+        val g = cell.grad
+        if (g != null && cell.gradBase == base) return g
+        val ng = LinearGradient(
+            0f, cell.r.top, 0f, cell.r.bottom,
+            lerp(base, Color.WHITE, 0.10f), lerp(base, Color.BLACK, 0.09f), Shader.TileMode.CLAMP,
+        )
+        cell.grad = ng
+        cell.gradBase = base
+        return ng
+    }
+
+    private fun drawKey(c: Canvas, cell: Cell, level: Float, rad: Float) {
+        val k = cell.key
+        val isFunc = k.kind != Kind.CHAR && k.kind != Kind.SPACE
+        val accentKey = k.kind == Kind.ENTER || (k.kind == Kind.SHIFT && shift != 0)
+        val base = when {
+            accentKey -> pal.accent
+            isFunc -> pal.func
+            else -> pal.key
+        }
+        val target = if (accentKey) lerp(pal.accent, pal.text, 0.2f) else pal.pressed
+        val color = lerp(base, target, level)
+        val rr = if (cfg.funcRound && k.pill) cell.r.height() / 2f else rad
+        val inset = level * dp(1.3f)
+        tmp.set(cell.r.left + inset, cell.r.top + inset, cell.r.right - inset, cell.r.bottom - inset)
+        fill.style = Paint.Style.FILL
+        fill.shader = null
+        when (cfg.keyStyle) {
+            1 -> { // مسطّح
+                fill.color = keyAlpha(color)
+                c.drawRoundRect(tmp, rr, rr, fill)
+            }
+            2 -> { // حدود فقط
+                fill.color = withAlpha(color, 34 + (110 * level).toInt())
+                c.drawRoundRect(tmp, rr, rr, fill)
+                stroke.strokeWidth = dp(1.3f)
+                stroke.color = lerp(if (accentKey) pal.accent else pal.hint, pal.accent, level)
+                c.drawRoundRect(tmp, rr, rr, stroke)
+            }
+            3 -> { // زجاجي
+                val glass = lerp(color, Color.WHITE, 0.25f)
+                fill.color = withAlpha(glass, (if (cfg.night) 80 else 165) + (60 * level).toInt())
+                if (accentKey) fill.color = withAlpha(pal.accent, 210)
+                c.drawRoundRect(tmp, rr, rr, fill)
+                stroke.strokeWidth = dp(1f)
+                stroke.color = Color.argb(if (cfg.night) 70 else 150, 255, 255, 255)
+                c.drawRoundRect(tmp, rr, rr, stroke)
+            }
+            else -> { // ناعم متدرّج
+                if (cfg.edge && level < 0.5f) {
+                    tmp2.set(tmp.left, tmp.top + dp(1.6f), tmp.right, tmp.bottom + dp(1.6f))
+                    fill.color = keyAlpha(pal.edge)
+                    c.drawRoundRect(tmp2, rr, rr, fill)
+                }
+                if (level < 0.02f) {
+                    fill.shader = gradFor(cell, base)
+                    fill.color = Color.WHITE
+                    fill.alpha = (255 * cfg.keyAlpha.coerceIn(20, 100) / 100)
+                } else {
+                    fill.color = keyAlpha(color)
+                }
+                c.drawRoundRect(tmp, rr, rr, fill)
+                fill.shader = null
+                stroke.strokeWidth = dp(1f)
+                stroke.color = Color.argb(if (cfg.night) 34 else 110, 255, 255, 255)
+                c.drawRoundRect(tmp, rr, rr, stroke)
+            }
+        }
+    }
+
+    private fun drawBubble(c: Canvas, r: RectF, label: String, alpha: Float, lift: Float) {
+        val bw = maxOf(r.width() * 1.45f, dp(60f))
+        val bh = r.height() * 1.3f
+        val l = (r.centerX() - bw / 2).coerceIn(dp(2f), maxOf(dp(2f), width - bw - dp(2f)))
+        val t = maxOf(dp(2f), r.top - bh + dp(8f) - lift)
+        val body = RectF(l, t, l + bw, t + bh)
+        val neck = RectF(r.left + dp(1f), t + bh - dp(16f), r.right - dp(1f), r.top + r.height() * 0.4f)
+        val corner = dp(14f)
+        val face = lerp(pal.key, pal.text, if (cfg.night) 0.14f else 0.03f)
+        // ظل خفيف
+        fill.style = Paint.Style.FILL
+        fill.shader = null
+        fill.color = Color.argb((70 * alpha).toInt(), 0, 0, 0)
+        tmp2.set(body.left, body.top + dp(3f), body.right, body.bottom + dp(3f))
+        c.drawRoundRect(tmp2, corner, corner, fill)
+        // الجسم والعنق
+        fill.color = scaleAlpha(face or (0xFF shl 24), alpha)
+        c.drawRoundRect(body, corner, corner, fill)
+        c.drawRoundRect(neck, dp(8f), dp(8f), fill)
+        stroke.strokeWidth = dp(1f)
+        stroke.color = scaleAlpha(withAlpha(pal.accent, 150), alpha)
+        c.drawRoundRect(body, corner, corner, stroke)
+        txt.color = scaleAlpha(pal.text or (0xFF shl 24), alpha)
+        txt.textSize = sp(32f)
+        tmp.set(body.left, body.top, body.right, body.bottom - dp(8f))
+        centerText(c, label, tmp)
+    }
+
     override fun onDraw(c: Canvas) {
+        val now = SystemClock.uptimeMillis()
+        var animating = false
         val rad = dp(cfg.radius)
+        txt.typeface = if (cfg.boldKeys) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+
+        val ri = releasedAt.entries.iterator()
+        while (ri.hasNext()) { if (now - ri.next().value > 180) ri.remove() }
+        val fi = fades.iterator()
+        while (fi.hasNext()) { if (now - fi.next().t > 130) fi.remove() }
+
         for (row in cells) for (cell in row) {
             val k = cell.key
             if (k.kind == Kind.SPACER) continue
-            val isPressed = presses.values.any { it.cell === cell }
-            val isFunc = k.kind != Kind.CHAR && k.kind != Kind.SPACE
-            val rr = if (cfg.funcRound && k.pill) cell.r.height() / 2f else rad
-            if (cfg.edge && !isPressed) {
-                tmp.set(cell.r.left, cell.r.top + dp(1.5f), cell.r.right, cell.r.bottom + dp(1.5f))
-                fill.color = alpha(pal.edge)
-                c.drawRoundRect(tmp, rr, rr, fill)
-            }
-            fill.color = alpha(
-                when {
-                    isPressed -> pal.pressed
-                    k.kind == Kind.ENTER -> pal.accent
-                    k.kind == Kind.SHIFT && shift != 0 -> pal.accent
-                    k.kind == Kind.EXT -> pal.func
-                    isFunc -> pal.func
-                    else -> pal.key
-                },
-            )
-            c.drawRoundRect(cell.r, rr, rr, fill)
+            val level = pressLevel(cell, now)
+            if (level > 0f && level < 1f) animating = true
+            if (releasedAt.containsKey(cell)) animating = true
+            drawKey(c, cell, level, rad)
+
             val onAcc = k.kind == Kind.ENTER || (k.kind == Kind.SHIFT && shift != 0)
             val label = labelOf(k)
             txt.textSize = when {
@@ -177,45 +357,63 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
             txt.color = when {
                 k.kind == Kind.SPACE -> pal.hint
                 onAcc -> pal.onAccent
-                k.kind == Kind.SYMBOLS || k.kind == Kind.NUMBERS -> pal.accent
-                k.kind == Kind.DELETE -> pal.accent
+                k.kind == Kind.SYMBOLS || k.kind == Kind.NUMBERS || k.kind == Kind.DELETE -> pal.accent
                 else -> pal.text
             }
-            centerText(c, label, cell.r)
-            if (cfg.hints && k.kind == Kind.CHAR && k.alts.isNotEmpty()) {
+            val dy = level * dp(0.8f)
+            tmp.set(cell.r.left, cell.r.top + dy, cell.r.right, cell.r.bottom + dy)
+            centerText(c, label, tmp)
+            val isDigitKey = label.length == 1 && Character.isDigit(label[0])
+            if (cfg.hints && !isDigitKey && k.kind == Kind.CHAR && k.alts.isNotEmpty()) {
                 txt.color = pal.accent
                 txt.textSize = sp(11f)
                 val f2 = txt.fontMetrics
-                c.drawText(k.alts[0], cell.r.right - dp(10f), cell.r.top + dp(6f) - f2.ascent, txt)
+                c.drawText(display(k.alts[0]), cell.r.right - dp(10f), cell.r.top + dp(6f) - f2.ascent, txt)
             }
         }
+
+        // فقاعة معاينة الحرف: تبقى أثناء الضغط ثم تختفي بنعومة
         if (cfg.preview && popup == null) {
             for (p in presses.values) {
                 val k = p.cell.key
-                if (k.kind != Kind.CHAR || p.longDone || k.text.isEmpty()) continue
-                val bw = maxOf(p.cell.r.width() * 1.3f, dp(56f))
-                val bh = p.cell.r.height() * 1.25f
-                val l = (p.cell.r.centerX() - bw / 2).coerceIn(0f, maxOf(0f, width - bw))
-                val t = maxOf(0f, p.cell.r.top - bh - dp(4f))
-                tmp.set(l, t, l + bw, t + bh)
-                fill.color = pal.accent
-                c.drawRoundRect(tmp, dp(14f), dp(14f), fill)
-                txt.color = pal.onAccent
-                txt.textSize = sp(30f)
-                centerText(c, k.label, tmp)
+                if (k.kind != Kind.CHAR || p.longDone || k.label.isEmpty()) continue
+                val e = ((now - p.t0) / 70f).coerceIn(0f, 1f)
+                if (e < 1f) animating = true
+                drawBubble(c, p.cell.r, k.label, 0.35f + 0.65f * e, dp(6f) * (1f - e))
+            }
+            for (f in fades) {
+                val a = 1f - ((now - f.t) / 130f).coerceIn(0f, 1f)
+                animating = true
+                drawBubble(c, f.rect, f.label, a, 0f)
             }
         }
+
         popup?.let { p ->
+            val corner = dp(14f)
+            fill.style = Paint.Style.FILL
+            fill.shader = null
+            fill.color = Color.argb(80, 0, 0, 0)
+            tmp2.set(p.box.left, p.box.top + dp(3f), p.box.right, p.box.bottom + dp(3f))
+            c.drawRoundRect(tmp2, corner, corner, fill)
+            fill.color = pal.func or (0xFF shl 24)
+            c.drawRoundRect(p.box, corner, corner, fill)
+            stroke.strokeWidth = dp(1f)
+            stroke.color = withAlpha(pal.accent, 140)
+            c.drawRoundRect(p.box, corner, corner, stroke)
             p.rects.forEachIndexed { i, r ->
-                fill.color = if (i == p.hover) pal.accent else pal.func
-                c.drawRoundRect(r, rad, rad, fill)
+                if (i == p.hover) {
+                    fill.color = pal.accent
+                    c.drawRoundRect(r, dp(10f), dp(10f), fill)
+                }
                 txt.color = if (i == p.hover) pal.onAccent else pal.text
                 txt.textSize = sp(24f)
-                centerText(c, p.items[i], r)
+                centerText(c, display(p.items[i]), r)
             }
         }
+        if (animating) postInvalidateOnAnimation()
     }
 
+    // ===== اللمس =====
     private fun hit(x: Float, y: Float): Cell? {
         var best: Cell? = null
         var bd = Float.MAX_VALUE
@@ -231,9 +429,9 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
 
     private fun begin(id: Int, x: Float, y: Float) {
         val cell = hit(x, y) ?: return
-        val p = Press(cell, x)
+        val p = Press(cell, x, y)
         presses[id] = p
-        if (cfg.haptic) performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        buzz()
         if (cfg.sound) playSoundEffect(SoundEffectConstants.CLICK)
         val k = cell.key
         when {
@@ -241,13 +439,18 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
                 p.longDone = true
                 listener?.onDelete()
                 val rep = object : Runnable {
-                    override fun run() { listener?.onDelete(); handler.postDelayed(this, cfg.repeatMs.toLong()) }
+                    var n = 0
+                    override fun run() {
+                        n++
+                        if (n > 10) listener?.onDeleteWord() else listener?.onDelete()
+                        handler.postDelayed(this, if (n > 10) 140L else cfg.repeatMs.toLong())
+                    }
                 }
                 p.job = rep
                 handler.postDelayed(rep, 420)
             }
             k.kind == Kind.CHAR && k.alts.isNotEmpty() -> {
-                val r = Runnable { longPress(id, p) }
+                val r = Runnable { openPopup(id, p) }
                 p.job = r
                 handler.postDelayed(r, cfg.longPressMs.toLong())
             }
@@ -255,6 +458,7 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
                 val r = Runnable {
                     p.longDone = true
                     presses.remove(id)
+                    releasedAt[p.cell] = SystemClock.uptimeMillis()
                     listener?.onLangLongPress()
                     invalidate()
                 }
@@ -265,30 +469,50 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
         invalidate()
     }
 
-    private fun longPress(id: Int, p: Press) {
-        p.longDone = true
+    /** يفتح قائمة البدائل (بالضغط المطوّل أو بالسحب للأعلى). */
+    private fun openPopup(id: Int, p: Press) {
         val k = p.cell.key
-        if (cfg.haptic) performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-        val cw = maxOf(p.cell.r.width(), dp(52f))
-        val total = cw * k.alts.size
-        val x0 = (p.cell.r.centerX() - total / 2).coerceIn(dp(4f), maxOf(dp(4f), width - total - dp(4f)))
+        if (k.alts.isEmpty() || popup != null) return
+        p.longDone = true
+        p.job?.let { handler.removeCallbacks(it) }
+        buzz()
+        val n = k.alts.size
+        val cw = minOf(maxOf(p.cell.r.width(), dp(46f)), (width - dp(8f)) / n)
+        val total = cw * n
+        // المفتاح الأول من البدائل يقع فوق المفتاح مباشرة (ليكون السحب القصير = أول بديل)
+        val x0 = p.cell.r.left.coerceIn(dp(4f), maxOf(dp(4f), width - total - dp(4f)))
         val kh = p.cell.r.height()
-        val y0 = if (p.cell.row > 0) p.cell.r.top - kh - dp(6f) else p.cell.r.bottom + dp(6f)
-        val rects = k.alts.indices.map { RectF(x0 + it * cw, y0, x0 + (it + 1) * cw - dp(4f), y0 + kh) }
-        popup = Popup(id, k.alts, rects)
+        val below = p.cell.row == 0
+        val y0 = if (below) p.cell.r.bottom + dp(8f) else p.cell.r.top - kh - dp(8f)
+        val rects = k.alts.indices.map {
+            RectF(x0 + it * cw + dp(3f), y0 + dp(3f), x0 + (it + 1) * cw - dp(3f), y0 + kh - dp(3f))
+        }
+        val pop = Popup(id, k.alts, rects, RectF(x0, y0, x0 + total, y0 + kh), below, p.cell.r.top, p.cell.r.bottom)
+        pop.hover = pop.nearest(p.lastX)
+        popup = pop
         invalidate()
+    }
+
+    private fun hoverAt(pop: Popup, x: Float, y: Float): Int {
+        val cancel = if (pop.below) y < pop.cellTop - dp(30f) else y > pop.cellBottom + dp(40f)
+        return if (cancel) -1 else pop.nearest(x)
     }
 
     private fun end(id: Int, x: Float, y: Float, cancel: Boolean) {
         val p = presses.remove(id) ?: return
         p.job?.let { handler.removeCallbacks(it) }
+        val now = SystemClock.uptimeMillis()
+        releasedAt[p.cell] = now
         val pop = popup
         if (pop != null && pop.pointer == id) {
-            val i = pop.hit(x, y)
+            val h = if (cancel) -1 else hoverAt(pop, x, y)
             popup = null
-            if (!cancel && i >= 0) { listener?.onText(pop.items[i]); afterChar() }
+            if (h >= 0) { listener?.onText(pop.items[h]); afterChar() }
             invalidate()
             return
+        }
+        if (!cancel && !p.longDone && cfg.preview && p.cell.key.kind == Kind.CHAR && p.cell.key.label.isNotEmpty()) {
+            fades.add(Fade(RectF(p.cell.r), p.cell.key.label, now))
         }
         if (!p.longDone && !cancel) fire(p.cell.key)
         invalidate()
@@ -304,13 +528,20 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
                 for (i in 0 until e.pointerCount) {
                     val id = e.getPointerId(i)
                     val p = presses[id] ?: continue
+                    val x = e.getX(i)
+                    val y = e.getY(i)
                     val pop = popup
                     if (pop != null && pop.pointer == id) {
-                        val h = pop.hit(e.getX(i), e.getY(i))
-                        if (h != pop.hover) { pop.hover = h; invalidate() }
+                        val h = hoverAt(pop, x, y)
+                        if (h != pop.hover) {
+                            pop.hover = h
+                            if (h >= 0 && cfg.haptic) performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            invalidate()
+                        }
+                        p.lastX = x
                     } else if (p.cell.key.kind == Kind.SPACE && cfg.swipeSpace) {
                         val step = dp(22f)
-                        val dx = e.getX(i) - p.lastX
+                        val dx = x - p.lastX
                         if (abs(dx) >= step) {
                             p.job?.let { handler.removeCallbacks(it) }
                             val n = (abs(dx) / step).toInt()
@@ -319,12 +550,19 @@ class KeyboardView(context: Context, private var cfg: KbConfig) : View(context) 
                             p.lastX += dir * n * step
                             p.longDone = true
                         }
+                    } else if (p.cell.key.kind == Kind.CHAR && p.cell.key.alts.isNotEmpty() &&
+                        p.cell.row > 0 && p.startY - y > dp(16f) && !p.longDone
+                    ) {
+                        // سحب للأعلى: تظهر البدائل فوراً بدون انتظار الضغط المطوّل
+                        p.lastX = x
+                        openPopup(id, p)
                     } else {
-                        val cell = hit(e.getX(i), e.getY(i))
+                        val cell = hit(x, y)
                         if (cell?.key !== p.cell.key) {
                             p.job?.let { handler.removeCallbacks(it) }
                             presses.remove(id)
-                            begin(id, e.getX(i), e.getY(i))
+                            releasedAt[p.cell] = SystemClock.uptimeMillis()
+                            begin(id, x, y)
                         }
                     }
                 }

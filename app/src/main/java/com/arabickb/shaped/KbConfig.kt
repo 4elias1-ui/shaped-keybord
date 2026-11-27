@@ -47,6 +47,13 @@ class KbConfig(
     val cBg: Int?,
     val cAccent: Int?,
     val cText: Int?,
+    val phone: Boolean,      // هاتف (أصغر عرض أقل من 600dp)
+    val keyStyle: Int,       // 0 ناعم متدرّج، 1 مسطّح، 2 حدود فقط، 3 زجاجي
+    val arLayout: Int,       // 0 حديث، 1 Windows، 2 أبجدي، 3 صوتي، 4 فارسي
+    val enLayout: Int,       // 0 QWERTY، 1 AZERTY، 2 QWERTZ، 3 Dvorak، 4 Colemak
+    val vibMs: Int,          // مدة الاهتزاز (0 = اهتزاز النظام)
+    val boldKeys: Boolean,
+    val autoCap: Boolean,    // أول حرف كبير تلقائياً (إنجليزي)
     val night: Boolean,
 ) {
     val amoled: Boolean get() = themeMode == 3
@@ -59,6 +66,7 @@ class KbConfig(
 
         fun load(p: SharedPreferences, ctx: Context): KbConfig {
             val mode = p.getInt("theme", 0)
+            val phone = ctx.resources.configuration.smallestScreenWidthDp < 600
             val night = when (mode) {
                 1 -> false
                 2, 3 -> true
@@ -68,23 +76,23 @@ class KbConfig(
                 themeMode = mode,
                 accent = p.getInt("accent", 5),
                 radius = p.getInt("radius", 10).toFloat(),
-                gap = p.getInt("gap", 6).toFloat(),
-                keyHeight = p.getInt("height", 56).toFloat(),
+                gap = p.getInt("gap", if (phone) 4 else 6).toFloat(),
+                keyHeight = (if (phone) p.getInt("height_p", 44) else p.getInt("height", 56)).toFloat(),
                 fontScale = p.getInt("font", 100) / 100f,
                 widthPct = p.getInt("width", 100),
                 align = p.getInt("align", 1),
-                numbers = p.getBoolean("numbers", false),
+                numbers = p.getBoolean("numbers", true),
                 hints = p.getBoolean("hints", true),
                 flip = p.getBoolean("flip", false),
                 haptic = p.getBoolean("haptic", true),
                 sound = p.getBoolean("sound", false),
-                longPressMs = p.getInt("longms", 380),
+                longPressMs = p.getInt("longms", 350),
                 repeatMs = p.getInt("repeatms", 45),
                 swipeSpace = p.getBoolean("swipe", true),
                 doubleSpace = p.getBoolean("dspace", true),
                 edge = p.getBoolean("edge", true),
                 preview = p.getBoolean("preview", true),
-                digits = p.getInt("digits", 1),
+                digits = p.getInt("digits", 3),
                 funcRound = p.getBoolean("fround", true),
                 bgMode = p.getInt("bgmode", 0),
                 bgGrad = p.getInt("bggrad", 0),
@@ -94,7 +102,7 @@ class KbConfig(
                 bgGradR = p.getInt("bggrad_r", 0),
                 bgDimR = p.getInt("bgdim_r", 30),
                 keyAlpha = p.getInt("keyalpha", 100),
-                previewRow = p.getBoolean("prow", true),
+                previewRow = p.getBoolean("prow", !phone),
                 split = p.getBoolean("split", false),
                 splitGap = p.getInt("splitgap", 20),
                 wrapLen = p.getInt("wrap", 0),
@@ -105,6 +113,13 @@ class KbConfig(
                 cBg = opt(p, "c_bg"),
                 cAccent = opt(p, "c_accent"),
                 cText = opt(p, "c_text"),
+                phone = phone,
+                keyStyle = p.getInt("kstyle", 0),
+                arLayout = p.getInt("arlayout", 0),
+                enLayout = p.getInt("enlayout", 0),
+                vibMs = p.getInt("vibms", 14),
+                boldKeys = p.getBoolean("bold", false),
+                autoCap = p.getBoolean("autocap", true),
                 night = night,
             )
         }

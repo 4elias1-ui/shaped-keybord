@@ -55,10 +55,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val themeInts = listOf(
-        "theme", "accent", "radius", "gap", "font", "keyalpha", "height", "width", "align", "digits", "splitgap",
+        "theme", "accent", "radius", "gap", "font", "keyalpha", "height", "height_p", "width", "align", "digits", "splitgap", "kstyle",
         "c_key", "c_func", "c_bg", "c_accent", "c_text", "bgmode", "bggrad", "bgdim", "bgmode_r", "bggrad_r", "bgdim_r",
     )
-    private val themeBools = listOf("fround", "edge", "hints", "preview", "flip", "numbers", "split", "bgsplit", "prow")
+    private val themeBools = listOf("fround", "edge", "hints", "preview", "flip", "numbers", "split", "bgsplit", "prow", "bold")
+
+    /** ثيمات جاهزة كاملة (ألوان + شكل المفاتيح + خلفية). */
+    private val readyThemes: List<Pair<String, String>> = listOf(
+        "سماوي ليلي" to "theme=2;accent=5;kstyle=0",
+        "أبيض نقي" to "theme=1;accent=0;kstyle=0",
+        "أسود ذهبي" to "theme=3;kstyle=0;c_accent=-2838729;c_key=-15264755;c_func=-14541550;c_text=-792639",
+        "غابة" to "theme=2;kstyle=0;c_bg=-16048361;c_key=-15453398;c_func=-14988741;c_accent=-11870592;c_text=-1640724",
+        "وردي ناعم" to "theme=1;kstyle=0;radius=14;c_bg=-6932;c_key=-1;c_func=-15660;c_accent=-2079365;c_text=-12969436",
+        "نيون" to "theme=3;kstyle=2;radius=12;c_accent=-53613;c_key=-15921900;c_func=-15069136;c_text=-1507329",
+        "زجاجي ليلي" to "theme=2;accent=5;kstyle=3;radius=14;bgmode=1;bggrad=3",
+        "غروب زجاجي" to "theme=2;accent=2;kstyle=3;radius=14;bgmode=1;bggrad=0",
+        "محيط" to "theme=2;accent=5;kstyle=3;radius=12;bgmode=1;bggrad=1",
+        "رمادي كلاسيكي" to "theme=1;accent=0;kstyle=1;radius=6",
+    )
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -273,13 +287,26 @@ class MainActivity : AppCompatActivity() {
         root.addView(pvRow, lp())
 
         root.addView(title("أنماط جاهزة"))
-        preset("الافتراضي", "radius" to null, "gap" to null, "height" to null, "font" to null, "width" to null, "align" to null, "keyalpha" to null)
+        preset("الافتراضي", "radius" to null, "gap" to null, "height" to null, "height_p" to null, "font" to null, "width" to null, "align" to null, "keyalpha" to null)
         preset("يد واحدة (يمين)", "width" to 65, "align" to 2, "height" to 60)
         preset("يد واحدة (يسار)", "width" to 65, "align" to 0, "height" to 60)
         preset("كبير ومريح", "height" to 68, "font" to 115, "gap" to 8, "radius" to 14, "width" to 100)
         preset("مدمج", "height" to 46, "font" to 90, "gap" to 4, "radius" to 8, "width" to 100)
 
         root.addView(title("الثيم والألوان"))
+        root.addView(body("ثيمات جاهزة: اختر واحداً ثم اضغط تطبيق (يغيّر الألوان وشكل المفاتيح والخلفية)."))
+        var chosenReady = 0
+        val readySpinner = Spinner(ctx)
+        readySpinner.adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, readyThemes.map { it.first })
+        readySpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) { chosenReady = pos }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        root.addView(readySpinner, lp())
+        root.addView(btn("تطبيق الثيم الجاهز") {
+            applyThemeData(readyThemes[chosenReady].second)
+            recreate()
+        }, lp())
         spinner("وضع الألوان", "theme", listOf("حسب النظام", "فاتح", "داكن", "أسود تماماً (AMOLED)"), 0)
         spinner("لون التمييز", "accent", listOf("أزرق", "أخضر", "وردي", "بنفسجي", "برتقالي", "سماوي"), 5)
         slider("استدارة المفاتيح", "radius", 0, 24, 10, " dp")
@@ -287,7 +314,9 @@ class MainActivity : AppCompatActivity() {
         slider("حجم الخط", "font", 80, 140, 100, "%")
         slider("شفافية المفاتيح (قلّلها لتظهر الخلفية)", "keyalpha", 30, 100, 100, "%")
         sw("مفاتيح الوظائف بيضاوية (حذف، إدخال، ؟123)", "fround", true)
-        sw("حافة سفلية للمفاتيح (مظهر ثلاثي الأبعاد)", "edge", true)
+        spinner("شكل المفاتيح", "kstyle", listOf("ناعم متدرّج", "مسطّح", "حدود فقط", "زجاجي"), 0)
+        sw("حروف عريضة", "bold", false)
+        sw("حافة سفلية للمفاتيح (مع الشكل المتدرّج)", "edge", true)
         sw("إظهار حرف أو رقم البدائل الصغير على المفاتيح", "hints", true)
         sw("فقاعة تكبير الحرف عند الضغط", "preview", true)
 
@@ -305,15 +334,19 @@ class MainActivity : AppCompatActivity() {
         bgSection("خلفية الكتابة المعكوسة", "_r", true)
 
         root.addView(title("الحجم والموضع"))
-        slider("ارتفاع المفاتيح", "height", 40, 76, 56, " dp")
+        slider("ارتفاع المفاتيح على التابلت", "height", 40, 76, 56, " dp")
+        slider("ارتفاع المفاتيح على الهاتف", "height_p", 34, 60, 44, " dp")
         slider("عرض الكيبورد", "width", 50, 100, 100, "%")
         spinner("مكان الكيبورد (عند تصغير العرض)", "align", listOf("يسار", "وسط", "يمين"), 1)
         sw("كيبورد منقسم (مناسب للتابلت)", "split", false)
         slider("عرض الفراغ الأوسط", "splitgap", 10, 40, 20, "%")
         sw("قلب أماكن مفاتيح الحذف والإدخال", "flip", false)
-        sw("صف أرقام مستقل (وإلا تظهر الأرقام كتلميحات على الصف الأول)", "numbers", false)
-        spinner("شكل الأرقام", "digits", listOf("1 2 3 (لاتيني)", "١ ٢ ٣ (عربي)", "۱ ۲ ۳ (فارسي)"), 1)
-        sw("إظهار سطر المعاينة فوق الكيبورد", "prow", true)
+        spinner("تخطيط الحروف العربية", "arlayout",
+            listOf("حديث (الافتراضي)", "Windows القياسي (101)", "أبجدي (حسب ترتيب الحروف)", "صوتي (QWERTY)", "فارسي (ISIRI)"), 0)
+        spinner("تخطيط الحروف الإنجليزية", "enlayout", listOf("QWERTY", "AZERTY", "QWERTZ", "Dvorak", "Colemak"), 0)
+        sw("صف أرقام مستقل في الأعلى", "numbers", true)
+        spinner("شكل الأرقام", "digits", listOf("1 2 3 (لاتيني)", "١ ٢ ٣ (عربي)", "۱ ۲ ۳ (فارسي)", "حسب اللغة (عربي مع العربية، لاتيني مع الإنجليزية)"), 3)
+        sw("إظهار سطر المعاينة فوق الكيبورد", "prow", resources.configuration.smallestScreenWidthDp >= 600)
 
         root.addView(title("الكتابة الذكية"))
         slider("تقسيم الأسطر الطويلة: عدد الأحرف في السطر (0 = معطّل)", "wrap", 0, 120, 0, "")
@@ -343,7 +376,9 @@ class MainActivity : AppCompatActivity() {
         sw("وضع الألعاب: الحذف بضغطات Backspace (فعّله إن ظهر تكرار أو تشويه في المباشر)", "game", false)
         sw("السحب على مفتاح المسافة لتحريك المؤشر", "swipe", true)
         sw("مسافتان تعطيان نقطة", "dspace", true)
-        slider("مدة الضغط المطوّل للبدائل", "longms", 200, 600, 380, " ms")
+        slider("مدة الضغط المطوّل للبدائل", "longms", 200, 600, 350, " ms")
+        sw("أول حرف كبير تلقائياً في الإنجليزية", "autocap", true)
+        slider("قوة الاهتزاز (0 = اهتزاز النظام)", "vibms", 0, 40, 14, " ms")
         slider("سرعة تكرار الحذف (أقل = أسرع)", "repeatms", 20, 100, 45, " ms")
         sw("اهتزاز عند اللمس", "haptic", true)
         sw("صوت عند اللمس", "sound", false)

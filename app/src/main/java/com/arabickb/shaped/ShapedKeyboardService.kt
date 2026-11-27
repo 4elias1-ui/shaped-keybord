@@ -36,11 +36,9 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
     private lateinit var previewRow: LinearLayout
     private lateinit var chipMode: TextView
     private lateinit var actionPill: TextView
-    private lateinit var segNormal: TextView
-    private lateinit var segRev: TextView
+    private lateinit var lamp: LampButton
     private lateinit var btnEmoji: TextView
     private lateinit var btnClip: TextView
-    private lateinit var btnExt: TextView
     private lateinit var btnEn: TextView
     private lateinit var btnAr: TextView
     private lateinit var suggestRow: LinearLayout
@@ -140,46 +138,54 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         rootView = root
 
         // ===== الشريط العلوي (أيقونات) =====
+        val ph = cfg.phone
+        val ts = if (ph) 16f else 18f
         val strip = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = bg(withA(pal.key, 210), 22)
             setPadding(dp(4f), 0, dp(4f), 0)
         }
-        strip.addView(icon("⚙", 1f) {
+        strip.addView(icon("⚙", 1f, ts) {
             startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         })
-        btnEmoji = icon("😊", 1f) { showPanel(if (panelMode == 1) 0 else 1) }
+        btnEmoji = icon("😊", 1f, ts) { showPanel(if (panelMode == 1) 0 else 1) }
         strip.addView(btnEmoji)
-        btnClip = icon("📋", 1f) { showPanel(if (panelMode == 2) 0 else 2) }
+        btnClip = icon("📋", 1f, ts) { showPanel(if (panelMode == 2) 0 else 2) }
         strip.addView(btnClip)
-        btnExt = icon("پچ", 1f, 16f) { showPanel(0); keyboard.toggleExtLayer() }
-        strip.addView(btnExt)
 
-        // زرّا الكتابة: عادي / معكوس
-        val seg = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, dp(34f), 2.8f)
-            background = bg(withA(pal.func, 200), 17)
+        // زر الكتابة المعكوسة: زر واحد بمصباح صغير (يشتعل = معكوس، مطفأ = عادي)
+        lamp = LampButton(this)
+        lamp.style(withA(pal.func, 215), pal.text, pal.accent, withA(pal.hint, 255))
+        lamp.setLit(converting, false)
+        lamp.layoutParams = LinearLayout.LayoutParams(0, dp(if (ph) 30f else 34f), 2.3f).apply {
+            setMargins(dp(4f), 0, dp(4f), 0)
         }
-        segNormal = icon("عادي", 1f, 14f) { setConverting(false) }
-        segRev = icon("معكوس", 1f, 14f) { setConverting(true) }
-        seg.addView(segNormal)
-        seg.addView(segRev)
-        strip.addView(seg)
+        lamp.setOnClickListener { setConverting(!converting) }
+        lamp.setOnLongClickListener {
+            toggleDeferred()
+            android.widget.Toast.makeText(
+                this@ShapedKeyboardService,
+                if (deferred) "وضع الدفعة: الكتابة في المعاينة ثم إدراج" else "الوضع المباشر",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+            true
+        }
+        strip.addView(lamp)
 
-        strip.addView(icon("🌐", 1f) {
+        strip.addView(icon("🌐", 1f, ts) {
             (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
         })
-        btnEn = icon("En", 1f, 16f) { showPanel(0); keyboard.showLanguage(true) }
+        btnEn = icon("En", 1f, if (ph) 15f else 16f) { showPanel(0); keyboard.showLanguage(true) }
         strip.addView(btnEn)
-        btnAr = icon("ع", 1f, 18f) { showPanel(0); keyboard.showLanguage(false) }
+        btnAr = icon("ع", 1f, ts) { showPanel(0); keyboard.showLanguage(false) }
+        // الضغط المطوّل على (ع) يفتح الحروف الإضافية (پ چ ژ گ ...)
+        btnAr.setOnLongClickListener { showPanel(0); keyboard.toggleExtLayer(); true }
         strip.addView(btnAr)
         root.addView(
             strip,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44f)).apply {
-                setMargins(dp(8f), dp(6f), dp(8f), dp(2f))
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(if (ph) 38f else 44f)).apply {
+                setMargins(dp(6f), dp(if (ph) 4f else 6f), dp(6f), dp(2f))
             },
         )
 
@@ -199,7 +205,7 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         }
         chipMode = pill("") { toggleDeferred() }
         actionPill = pill("") { onAction() }
-        previewRow.addView(preview, LinearLayout.LayoutParams(0, dp(34f), 1f))
+        previewRow.addView(preview, LinearLayout.LayoutParams(0, dp(if (cfg.phone) 28f else 34f), 1f))
         previewRow.addView(chipMode, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(30f)).apply { marginEnd = dp(6f) })
         previewRow.addView(actionPill, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(30f)))
         root.addView(previewRow, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -214,7 +220,7 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         sugViews.clear()
         for (i in 0 until 3) {
             val tv = TextView(this).apply {
-                textSize = 17f
+                textSize = if (cfg.phone) 15f else 17f
                 gravity = Gravity.CENTER
                 maxLines = 1
                 setTextColor(pal.text)
@@ -223,7 +229,7 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
                 setOnClickListener { (tag as? String)?.let { w -> applySuggestion(w) } }
             }
             sugViews.add(tv)
-            val lp = LinearLayout.LayoutParams(0, dp(36f), 1f)
+            val lp = LinearLayout.LayoutParams(0, dp(if (cfg.phone) 32f else 36f), 1f)
             lp.marginStart = dp(3f)
             lp.marginEnd = dp(3f)
             suggestRow.addView(tv, lp)
@@ -266,11 +272,9 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
     override fun onLayerChanged() { updateUi() }
 
     private fun updateUi() {
-        mark(segNormal, !converting)
-        mark(segRev, converting)
+        lamp.setLit(converting)
         mark(btnEmoji, panelMode == 1)
         mark(btnClip, panelMode == 2)
-        mark(btnExt, panelMode == 0 && keyboard.isExtLayer())
         mark(btnEn, panelMode == 0 && keyboard.isEnglish())
         mark(btnAr, panelMode == 0 && !keyboard.isEnglish())
         chipMode.text = if (deferred) "دفعة" else "مباشر"
@@ -304,13 +308,19 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         val v = info.inputType and EditorInfo.TYPE_MASK_VARIATION
         val password = cls == EditorInfo.TYPE_CLASS_TEXT && (v == EditorInfo.TYPE_TEXT_VARIATION_PASSWORD ||
             v == EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD || v == EditorInfo.TYPE_TEXT_VARIATION_WEB_PASSWORD)
-        rawField = (cls != EditorInfo.TYPE_CLASS_TEXT) || password
+        val emailish = cls == EditorInfo.TYPE_CLASS_TEXT && (v == EditorInfo.TYPE_TEXT_VARIATION_EMAIL_ADDRESS ||
+            v == EditorInfo.TYPE_TEXT_VARIATION_URI || v == EditorInfo.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS)
+        rawField = (cls != EditorInfo.TYPE_CLASS_TEXT) || password || emailish
         converting = prefs.getBoolean("convert", true)
         deferred = prefs.getBoolean("deferred", false)
         gameMode = prefs.getBoolean("game", false)
         loadLists()
         rootView?.applyBg(cfg, converting)
         captureClip()
+        // اختيار اللوحة المناسبة للحقل
+        if (cls == EditorInfo.TYPE_CLASS_NUMBER || cls == EditorInfo.TYPE_CLASS_PHONE) keyboard.showNumbers()
+        else if (emailish) keyboard.showLanguage(true)
+        else keyboard.backToLetters()
         showPanel(0)
     }
 
@@ -385,7 +395,16 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
         if (cfg.suggest && out.length >= 2) suggester.learn(out)
     }
 
+    /** أول حرف كبير تلقائياً في الإنجليزية: بداية الحقل أو بعد نقطة/علامة تعجب/استفهام. */
+    private fun needsCap(): Boolean {
+        if (!cfg.autoCap || gameMode || rawField || panelMode != 0 || !keyboard.isEnglish()) return false
+        val t: String = if (deferred && active()) logical.toString()
+        else (currentInputConnection?.getTextBeforeCursor(3, 0)?.toString() ?: return false)
+        return t.isEmpty() || t.endsWith("\n") || (t.length >= 2 && t.endsWith(" ") && t[t.length - 2] in ".!?")
+    }
+
     private fun updateSuggestions() {
+        keyboard.autoShift(needsCap())
         if (!cfg.suggest) return
         val w = if (panelMode == 0 && !rawField) currentWord() else ""
         val list: List<String> = if (w.isEmpty()) emptyList<String>() else suggester.suggest(w, 3)
@@ -462,6 +481,32 @@ class ShapedKeyboardService : InputMethodService(), KeyboardView.Listener, ToolA
             updateUi()
         }
         sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+    }
+
+    override fun onDeleteWord() {
+        if (active() && logical.isNotEmpty()) {
+            if (deferred || segmentIntact()) {
+                var n = logical.length
+                while (n > 0 && logical[n - 1].isWhitespace()) n--
+                while (n > 0 && !logical[n - 1].isWhitespace()) n--
+                logical.setLength(n)
+                if (deferred) updateUi()
+                else if (logical.isEmpty()) { deleteShown(); updateUi() }
+                else refresh()
+                return
+            }
+            resetSegment()
+            updateUi()
+        }
+        val ic = currentInputConnection ?: return
+        val b = ic.getTextBeforeCursor(40, 0)?.toString() ?: ""
+        var n = b.length
+        while (n > 0 && b[n - 1].isWhitespace()) n--
+        while (n > 0 && !b[n - 1].isWhitespace()) n--
+        val count = b.length - n
+        if (count <= 0) { sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL); return }
+        if (gameMode) repeat(count) { sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL) }
+        else ic.deleteSurroundingText(count, 0)
     }
 
     private fun insertPending() {
